@@ -10,7 +10,7 @@ def main():
         data, addr = sock.recvfrom(1024)
         print(f"Received from {addr}: {data.decode()}")
 
-        response = b"Messafe received"
+        response = b"Message received"
         sock.sendto(response, addr)
 
 if __name__ == '__main__':
