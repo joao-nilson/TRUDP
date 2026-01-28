@@ -54,6 +54,8 @@ def main():
         print(f'Erro ao salvar: {e}', file=sys.stderr)
         sys.exit(1)
 
+        response = b"Message received"
+        sock.sendto(response, addr)
 
 if __name__ == '__main__':
     main()

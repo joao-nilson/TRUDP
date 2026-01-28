@@ -2,8 +2,11 @@ import socket
 import time
 import threading
 from packet import TRUPacket, PacketType
+from typing import Optional, List
+from congestion import CongestionControl
 
 class TRUProtocol:
+
     def __init__(self, host='0.0.0.0', port=5000, is_server=False):
         self.host = host
         self.port = port
@@ -16,50 +19,116 @@ class TRUProtocol:
 
         self.connected = False
         self.peer_addr = None
-        self.seq_num = 0
-        self.expected_seq = 0
 
-    def connected(self, host, port):
-        self.peer_addr = (host, port)
+        self.send_window = []
+        self.receive_buffer = []
+        self.window_size = 4
+        self.base_seq = 0
+        self.next_seq = 0
 
-        #envia
-        syn_packet = TRUPacket(seq_num=self.seq_num, packet_type=PacketType.SYN)
-        self.seq_num += 1
-        self._send_raw(syn_packet.serialize())
-        
-        #recebe ack
-        data, addr = self.sock.recvfrom(1024)
-        packet = TRUPacket.deserialize(data)
+        self.congestion = CongestionControl()
 
-        if packet.packet_type == PacketType.SYN_ACK:
-            self.connected = True
-            return True
-        return False
+        self.receiver_thread = None
+        self.running = False
 
-    def send(self, data: bytes):
-        if not self.connected:
+    def start(self):
+        self.running = True
+        self.receiver_thread = threading.Thread(target=self._receiver_loop)
+        self.receiver_thread.start()
+
+    def _receiver_loop(self):
+        while self.running:
+            try:
+                data, addr = self.sock.recvfrom(2048)
+                packet = TRUPacket.deserialize(data)
+                self._process_packet(packet, addr)
+            except:
+                continue
+
+    def _process_packet(self, packet: TRUPacket, addr: Tuple[str, int]):
+        if packet.packet_type == PacketType.ACK:
+            self._update_send_window(packet.ack_num)
+
+        elif packet.packet_type == PacketType.DATA:
+            self.receive_buffer.append(packet)
+
+            ack_packet = TRUPacket(ack_num=packet.seq_num + 1, packet_type=PacketType.ACK)
+            self._send_raw(ack_packet.serialize(), addr)
+
+    def send(self, data: bytes) -> bool:
+        if not self.connected or not self.peer_addr:
             return False
 
-        packet = TRUPacket(seq_num=self.seq_num, packet_type=PacketType.DATA, data=data)
-        self.seq_num += 1
-        self._send_raw(packet.serialize())
+        packet_size = 1400
+        packets = []
+
+        for i in range(0, len(data), packet_size):
+            chunk = data[i:i+packet_size]
+            packet = TRUPacket(seq_num=self.next_seq, packet_type=PacketType.DATA, data=chunk, timestamp=time.time())
+            self.next_seq += 1
+            packets.append(packet)
+        
+        for packet in packets:
+            while len(self.send_window) >= self.window_size:
+                time.sleep(0.1)
+            self.send_window.append(packet)
+            self._send_raw(packet.serialize(), self.peer_addr)
+
         return True
 
-    def receive(self):
-        data, addr = self.sock.recvfrom(1024)
-        packet = TRUPacket.deserialize(data)
+    def _update_send_window(self, ack_num: int):
+        self.send_window = [p for p in self.send_window if p.seq_num >= ack_num
 
-        if packet.packet_type == PacketType.DATA:
-            ack_packet = TRUPacket(ack_num=self.seq_num, packet_type=PacketType.ACK)
-            self._send_raw(ack_packet.serialize())
-        
-        return packet.data
+    def receive(self, timeout: float = 1.0) -> Optional[bytes]:
+        start_time = time.time()
 
-    def _send_raw(self, data: bytes):
-        self.sock.sendto(data, self.peer_addr)
+        while time.time() - start_time < timeout:
+            if self.receive_buffer
+                for i, packet in enumerate(self.receive_buffer):
+                    if packet.seq_num  == self.base_seq:
+                        self.receive_buffer.pop(i)
+                        self.base_seq += 1
+                        return packet_data
+            time.sleep(0.01)
+
+        return None
 
     def close(self):
-        if self.connected:
-            fin_packet = TRUPacket(packet_type=PacketType.FIN)
-            self._send_raw(fin_packet.serialize())
+        if self.connected and self.peer_addr:
+            fin_packet = TRUPacket(
+                seq_num=self.next_seq,
+                packet_type=PacketType.FIN,
+                timestamp=time.time()
+            )
+            self._send_raw(fin_packet.serialize(), self.peer_addr)
+            self.next_seq += 1
+
+            try:
+                self.sock.settimeout(2.0)
+                data, _ = self.sock.recvfrom(1024)
+                packet = TRUPacket.deserialize(data)
+
+                if packet.packet_type == PacketType.FIN_ACK:
+                    print("COnexão fechou de forma correta")
+            except socket.timeout:
+                print("Conexão fechada por timeout")
+        
+        self.running = False
+        if self.receiver_thread:
+            self.receiver_thread.join(timeout=1.0)
         self.sock.close()
+        self.connected = False
+
+    def _send_raw(self, data: bytes, addr: Tuple[str, int]):
+        try:
+            self.sock.sendto(data, addr)
+        except Exception as e:
+            print(f"Erro ao enviar dados: {e}")
+
+    def connect(self, host: str, port: int) -> bool:
+        self.peer_addr = (host, port)
+        self.connected = True
+        return True
+
+    def accept_connection(self) -> bool:
+        return True
