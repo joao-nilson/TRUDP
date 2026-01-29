@@ -3,7 +3,7 @@ import time
 class CongestionControl:
     def __init__(self):
         self.cwnd = 1.0
-        self.sstresh = 64.0
+        self.ssthresh = 64.0
         self.state = "SLOW_START"
 
         self.dup_ack_count = 0
@@ -30,7 +30,7 @@ class CongestionControl:
         
         if self.state == "SLOW_START":
             self.cwnd += 1
-            if self.cwnd >= self.sstresh:
+            if self.cwnd >= self.ssthresh:
                 self.state = "CONGESTION_AVOIDANCE"
         elif self.state == "CONGESTION_AVOIDANCE":
             self.cwnd += 1 / self.cwnd
@@ -45,8 +45,8 @@ class CongestionControl:
         self.dup_ack_count = 0
 
     def on_three_duplicate_acks(self):
-        self.sstresh = max(self.cwnd / 2, 2.0)
-        self.cwnd = self.sstresh
+        self.ssthresh = max(self.cwnd / 2, 2.0)
+        self.cwnd = self.ssthresh
         self.state = "FAST_RECOVERY"
 
     def get_window_size(self) -> int:
