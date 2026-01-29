@@ -42,7 +42,7 @@ class TRUPacket:
             raise ValueError("Pacote pequeno demais")
 
         header = data[:cls.HEADER_SIZE]
-        seq_num, ack_num, packet_type, window, checksum, timestamp = struct.unpack('!IIBHIQ', header[:24])
+        seq_num, ack_num, packet_type, window, checksum, timestamp = struct.unpack('!IIBHIQ', header)
         packet_data = data[cls.HEADER_SIZE:] if len(data) > cls.HEADER_SIZE else b''
 
         return cls(
@@ -51,7 +51,7 @@ class TRUPacket:
             packet_type = packet_type,
             window = window,
             checksum = checksum,
-            timestamp = timestamp / 1000000.0
+            timestamp = timestamp / 1000000.0,
             data = packet_data
         )
     
