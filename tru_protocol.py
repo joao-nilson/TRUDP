@@ -8,6 +8,8 @@ from crypto import TRUCrypto
 import random
 
 MSS = 1400
+# Controle de fluxo: máximo de segmentos que o destinatário aceita em buffer
+MAX_RECV_WINDOW = 256
 
 class TRUProtocol:
 
@@ -45,8 +47,9 @@ class TRUProtocol:
         self.receive_buffer = {} # seq -> data
         self.receive_segments = set()
         
-        #window control
+        # window control (congestion) + controle de fluxo (janela do destinatário)
         self.window_size = 4
+        self.recv_window = MAX_RECV_WINDOW  # janela anunciada pelo destinatário nos ACKs
         self.congestion = CongestionControl()
         
         #thread control
@@ -135,6 +138,9 @@ class TRUProtocol:
             if seq < ack_num:
                 del self.send_buffer[seq]
 
+        # Controle de fluxo: atualizar janela do destinatário (não afogar o receptor)
+        self.recv_window = max(1, packet.window)
+
         self.congestion.on_ack_received()
         self.window_size = self.congestion.get_window_size()
 
@@ -145,9 +151,14 @@ class TRUProtocol:
         self.receive_buffer[packet.seq_num] = packet.data
         self.received_segments.add(packet.seq_num)
 
+        # Controle de fluxo: anunciar quantos segmentos ainda cabem no buffer do destinatário
+        segments_held = len(self.receive_buffer) + len(self.app_queue)
+        advertised_window = max(0, MAX_RECV_WINDOW - segments_held)
+
         ack_packet = TRUPacket(
             ack_num=packet.seq_num + len(packet.data),
             packet_type=PacketType.ACK,
+            window=advertised_window,
             timestamp=time.time()
         )
         self._send_raw(ack_packet.serialize(), addr)
@@ -363,9 +374,12 @@ class TRUProtocol:
         total_segments = len(segments)
         
         for i, segment in enumerate(segments):
-            while len(self.send_buffer) >= self.window_size:
+            # Controle de fluxo: não enviar além da janela do destinatário nem da janela de congestionamento
+            effective_window = min(self.window_size, self.recv_window)
+            while len(self.send_buffer) >= effective_window:
                 time.sleep(0.01)
-                
+                effective_window = min(self.window_size, self.recv_window)
+
             packet = TRUPacket(
                 seq_num=self.next_seq,
                 packet_type=PacketType.DATA,
@@ -382,8 +396,19 @@ class TRUProtocol:
             if progress_cb:
                 progress_cb(i+1, total_segments)
                 
+        # Esperar ACKs; retransmitir pacotes não confirmados após RTO (preenche lacunas com perda)
         start_time = time.time()
-        while self.send_buffer and time.time() - start_time < 30.0:
+        RTO = 1.0  # retransmitir após 1 s sem ACK
+        send_timeout = 180.0  # alinhado ao servidor
+        while self.send_buffer and time.time() - start_time < send_timeout:
+            if not self.connected:
+                break  # servidor fechou a conexão
+            now = time.time()
+            for seq in list(self.send_buffer.keys()):
+                packet, sent_time, retries = self.send_buffer[seq]
+                if now - sent_time >= RTO:
+                    self._send_raw(packet.serialize(), self.peer_addr)
+                    self.send_buffer[seq] = (packet, now, retries + 1)
             time.sleep(0.1)
             
         return len(self.send_buffer) == 0
@@ -392,8 +417,9 @@ class TRUProtocol:
         data = b''
         received_segments = 0
         start_time = time.time()
-        
-        while received_segments < expected_segments and time.time() - start_time < 30.0:
+        # Timeout alinhado ao cliente (180s para permitir retransmissões com perda)
+        timeout = 180.0
+        while received_segments < expected_segments and time.time() - start_time < timeout:
             if self.app_queue:
                 segment = self.app_queue.pop(0)
                 data += segment
