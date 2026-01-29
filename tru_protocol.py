@@ -4,6 +4,7 @@ import threading
 from packet import TRUPacket, PacketType
 from typing import Optional, Tuple, Callable, List
 from congestion import CongestionControl
+from crypto import TRUCrypto
 import random
 
 MSS = 1400
@@ -15,6 +16,9 @@ class TRUProtocol:
         self.port = port
         self.is_server = is_server
         self.loss_callback = loss_callback
+        self.crypto = TRUCrypto()
+        self.encryption_enabled = False
+        self.encryption_key = None
 
         #socket udp
         self.sock = socket.socket(socket.AF_INET, sock.SOCK_DGRAM)
@@ -377,3 +381,81 @@ class TRUProtocol:
                 time.sleep(0.01)
                 
         return data
+
+    def do_key_exchange_as_client(self) -> bool:
+        try:
+            g, p, private = self.crypto.generate_dh_params()
+            public = self.crypto.compute_dh_public(g, p, private)
+            
+            dh_data = f"DH:{g}:{p}:{public}".encode()
+            packet = TRUPacket(
+                seq_num=self.next_seq,
+                packet_type=PacketType.DATA,
+                data=dh_data,
+                timestamp=time.time()
+            )
+            self.next_seq += 1
+            self._send_raw(packet.serialize(), self.peer_addr)
+            
+            start_time = time.time()
+            while time.time() - start_time < 5.0:
+                try:
+                    self.sock.settimeout(1.0)
+                    data, addr = self.sock.recvfrom(1024)
+                    packet = TRUPacket.deserialize(data)
+                    
+                    if packet.data.startswith(b"DH:"):
+                        parts = packet.data.decode().split(':')
+                        server_public = int(parts[1])
+                        
+                        shared = self.crypto.compute_dh_shared(server_public, private, p)
+                        self.encryption_key, _ = self.crypto.derive_key(shared)
+                        self.encryption_enabled = True
+                        return True
+                        
+                except socket.timeout:
+                    continue
+                    
+        except Exception as e:
+            print(f"Key exchange error: {e}")
+            
+        return False
+        
+    def do_key_exchange_as_server(self):
+        try:
+            start_time = time.time()
+            while time.time() - start_time < 5.0:
+                try:
+                    self.sock.settimeout(1.0)
+                    data, addr = self.sock.recvfrom(1024)
+                    packet = TRUPacket.deserialize(data)
+                    
+                    if packet.data.startswith(b"DH:"):
+                        parts = packet.data.decode().split(':')
+                        g = int(parts[1])
+                        p = int(parts[2])
+                        client_public = int(parts[3])
+                        
+                        private = self.crypto.generate_dh_params()[2]
+                        server_public = self.crypto.compute_dh_public(g, p, private)
+                        
+                        shared = self.crypto.compute_dh_shared(client_public, private, p)
+                        self.encryption_key, _ = self.crypto.derive_key(shared)
+                        self.encryption_enabled = True
+                        
+                        response = f"DH:{server_public}".encode()
+                        resp_packet = TRUPacket(
+                            seq_num=self.next_seq,
+                            packet_type=PacketType.DATA,
+                            data=response,
+                            timestamp=time.time()
+                        )
+                        self.next_seq += 1
+                        self._send_raw(resp_packet.serialize(), addr)
+                        return
+                        
+                except socket.timeout:
+                    continue
+                    
+        except Exception as e:
+            print(f"Key exchange error: {e}")
