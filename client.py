@@ -40,6 +40,7 @@ def main():
         print('Falha no handshake.', file=sys.stderr)
         sys.exit(1)
     print('Handshake OK.')
+    conn.start()
 
     if not conn.do_key_exchange_as_client():
         print('Falha no acordo de criptografia.', file=sys.stderr)

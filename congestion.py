@@ -4,6 +4,10 @@ class CongestionControl:
         self.sstresh = 64.0
         self.state = "SLOW_START"
 
+    def on_packet_sent(self):
+        """Chamado a cada pacote enviado; pode ser usado para rastrear pacotes em voo."""
+        pass
+
     def on_ack_received(self):
         if self.state == "SLOW_START":
             self.cwnd += 1

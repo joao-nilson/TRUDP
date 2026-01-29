@@ -24,7 +24,7 @@ class TRUPacket:
     timestamp: float = 0.0
     data: bytes = b''
 
-    HEADER_SIZE = 25    #seq(4) + ack(4) + type(1) + window(2) + checksum(4) + timestamp(8)
+    HEADER_SIZE = 23    # I(4) + I(4) + B(1) + H(2) + I(4) + Q(8) = 23
 
     def serialize(self) -> bytes:
         header = struct.pack('!IIBHIQ',

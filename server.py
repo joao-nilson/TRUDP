@@ -22,7 +22,8 @@ def main():
     total_segments = max(args.packets, 10000)
 
     def loss_filter(seq):
-        return random.random() >= loss_p
+        # Descartar pacote com probabilidade loss_p (sortear a cada chegada)
+        return random.random() < loss_p
 
     conn = TRUConnection(host=args.host, port=args.port, is_server=True, loss_callback=loss_filter)
     print(f'Servidor ouvindo em {args.host}:{args.port}')
@@ -37,6 +38,7 @@ def main():
 
     conn.do_key_exchange_as_server()
     print('Criptografia acordada (chave enviada ao cliente).')
+    conn.start()
 
     def progress(received, total):
         if total > 0 and (received % max(1, total // 20) == 0 or received == total):
@@ -53,9 +55,6 @@ def main():
     except Exception as e:
         print(f'Erro ao salvar: {e}', file=sys.stderr)
         sys.exit(1)
-
-        response = b"Message received"
-        sock.sendto(response, addr)
 
 if __name__ == '__main__':
     main()

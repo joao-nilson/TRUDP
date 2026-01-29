@@ -21,24 +21,24 @@ class TRUProtocol:
         self.encryption_key = None
 
         #socket udp
-        self.sock = socket.socket(socket.AF_INET, sock.SOCK_DGRAM)
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         if is_server:
             self.sock.bind((host, port))
 
         self.sock.settimeout(1.0)
 
+        # seq numbers (definir antes de ack_num)
+        self.base_seq = random.randint(0, 2**31 - 1)
+        self.next_seq = self.base_seq
         self.ack_num = self.base_seq
+        self.ack_sum = 0
+
         self.send_window = []
         self.received_segments = set()
         
-        #status connection
+        # status connection
         self.connected = False
         self.peer_addr = None
-        
-        #seq numbers
-        self.base_seq = random.randint(0, 2**31 -1)
-        self.next_seq = self.base_seq
-        self.ack_sum = 0
         
         #buffers
         self.send_buffer = {} # seq -> packet, sent_time, retries
@@ -50,7 +50,7 @@ class TRUProtocol:
         self.congestion = CongestionControl()
         
         #thread control
-        self.receive_thread = None
+        self.receiver_thread = None
         self.running = False
         
         #queue
@@ -146,7 +146,7 @@ class TRUProtocol:
         self.received_segments.add(packet.seq_num)
 
         ack_packet = TRUPacket(
-            packet_num=packet.seq_num + len(packet.data),
+            ack_num=packet.seq_num + len(packet.data),
             packet_type=PacketType.ACK,
             timestamp=time.time()
         )
@@ -260,10 +260,11 @@ class TRUProtocol:
             timestamp=time.time()
         )
         self.next_seq += 1
-        self.__send_raw(syn_packet.serialize(), self.peer_addr)
+        self._send_raw(syn_packet.serialize(), self.peer_addr)
 
-        #espera SYN-ACK
+        # Espera SYN-ACK; reenvia SYN a cada 1s para tolerar perda ou servidor ainda não pronto
         start_time = time.time()
+        last_syn = start_time
         while time.time() - start_time < 5.0:
             try:
                 self.sock.settimeout(1.0)
@@ -286,9 +287,19 @@ class TRUProtocol:
                     return True
 
             except socket.timeout:
-                continue
+                pass
+            except (ConnectionResetError, OSError):
+                pass
+            except ValueError:
+                # Pacote inválido; ignorar
+                pass
+            # Reenviar SYN a cada ~1s para aumentar chance de sucesso
+            now = time.time()
+            if now - last_syn >= 1.0:
+                self._send_raw(syn_packet.serialize(), self.peer_addr)
+                last_syn = now
 
-        return True
+        return False
 
     def accept(self) -> bool:
         if not self.is_server:
@@ -309,7 +320,7 @@ class TRUProtocol:
                         timestamp=time.time()
                     )
                     self.next_seq += 1
-                    self._send_packet(syn_ack_packet.serialize(), addr)
+                    self._send_raw(syn_ack_packet.serialize(), addr)
                     
                     self.sock.settimeout(5.0)
                     try:
@@ -319,10 +330,23 @@ class TRUProtocol:
                         if ack_packet.packet_type == PacketType.ACK:
                             self.connected = True
                             self.base_seq = ack_packet.seq_num
+                            self.ack_num = ack_packet.seq_num  # próximo seq esperado do cliente
                             return True
                             
                     except socket.timeout:
+                        # Timeout esperando ACK; voltar a esperar novo SYN (resetar timeout)
+                        self.sock.settimeout(1.0)
                         continue
+                    except ValueError:
+                        # Pacote inválido (ex.: pequeno demais); ignorar e voltar a esperar SYN
+                        self.sock.settimeout(1.0)
+                        continue
+            except socket.timeout:
+                # Timeout esperando SYN; continuar ouvindo (não encerrar)
+                continue
+            except ValueError:
+                # Pacote inválido (ICMP, lixo, etc.); ignorar e continuar ouvindo
+                continue
             except Exception as e:
                 print(f"Accept error: {e}")
                 return False
@@ -442,6 +466,8 @@ class TRUProtocol:
                         shared = self.crypto.compute_dh_shared(client_public, private, p)
                         self.encryption_key, _ = self.crypto.derive_key(shared)
                         self.encryption_enabled = True
+                        # Cliente enviou 1 "segmento" (DH); próximo dado terá seq_num = packet.seq_num + 1
+                        self.ack_num = packet.seq_num + 1
                         
                         response = f"DH:{server_public}".encode()
                         resp_packet = TRUPacket(
@@ -459,3 +485,12 @@ class TRUProtocol:
                     
         except Exception as e:
             print(f"Key exchange error: {e}")
+
+
+# Aliases para compatibilidade com client.py e server.py
+TRUConnection = TRUProtocol
+
+
+def set_global_loss_probability(p: float) -> None:
+    """Reservado para perda global; a perda real é controlada por loss_callback no servidor."""
+    pass
