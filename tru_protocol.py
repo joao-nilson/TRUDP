@@ -127,8 +127,65 @@ class TRUProtocol:
 
     def connect(self, host: str, port: int) -> bool:
         self.peer_addr = (host, port)
-        self.connected = True
+
+        #SYN
+        syn_packet = TRUPacket(seq_num=self.next_seq, packet_type=PacketType.SYN, timestamp=time.time())
+        self.next_seq += 1
+        self.__send_packet(syn_packet, self.peer_addr)
+
+        #espera SYN-ACK
+        start_time = time.time()
+        while time.time() - start_time < 5.0:
+            try:
+                self.sock.settimeout(1.0)
+                data, addr = self.sock.recvfrom(1024)
+                packet = TRUPacket.deserialize(data)
+
+                if (packet.packet_type == PacketType.SYN_ACK and
+                    packet.ack_num == syn_packet.seq_num + 1):
+
+                    ack_packet = TRUPacket(
+                        seq_num=packet.ack_num,
+                        ack_num=packet.seq_num + 1,
+                        packet_type=PacketType.ACK,
+                        timestamp=time.time()
+                    )
+                    self._send_packet(ack_packet, self.peer_addr)
+
+                    self.connected = True
+                    self.base_seq = packet.ack_num
+                    return True
+
+            except socket.timeout:
+                continue
+
         return True
 
     def accept_connection(self) -> bool:
-        return True
+        while True:
+            data, addr = self.sock.recvfrom(1024)
+            packet = TRUPacket.deserialize(data)
+            
+            if packet.packet_type == PacketType.SYN:
+                syn_ack_packet = TRUPacket(
+                    seq_num=self.next_seq,
+                    ack_num=packet.seq_num + 1,
+                    packet_type=PacketType.SYN_ACK,
+                    timestamp=time.time()
+                )
+                self.next_seq += 1
+                self._send_packet(syn_ack_packet, addr)
+                
+                self.sock.settimeout(5.0)
+                try:
+                    data, _ = self.sock.recvfrom(1024)
+                    ack_packet = TRUPacket.deserialize(data)
+                    
+                    if ack_packet.packet_type == PacketType.ACK:
+                        self.peer_addr = addr
+                        self.connected = True
+                        self.base_seq = ack_packet.seq_num
+                        return True
+                        
+                except socket.timeout:
+                    continue
