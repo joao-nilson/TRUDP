@@ -250,7 +250,12 @@ class TRUProtocol:
         self.peer_addr = (host, port)
 
         #SYN
-        syn_packet = TRUPacket(seq_num=self.next_seq, packet_type=PacketType.SYN, timestamp=time.time())
+        syn_packet = TRUPacket(
+            seq_num=self.next_seq,
+            packet_type=PacketType.SYN, 
+            timestamp=time.time()
+        )
+        self.next_seq += 1
         self.__send_raw(syn_packet.serialize(), self.peer_addr)
 
         #espera SYN-ACK
@@ -262,7 +267,7 @@ class TRUProtocol:
                 packet = TRUPacket.deserialize(data)
 
                 if (packet.packet_type == PacketType.SYN_ACK and
-                    packet.ack_num == self.base_seq + 1):
+                    packet.ack_num == syn_packet.seq_num + 1):
 
                     ack_packet = TRUPacket(
                         seq_num=packet.ack_num,
@@ -281,31 +286,94 @@ class TRUProtocol:
 
         return True
 
-    def accept_connection(self) -> bool:
+    def accept(self) -> bool:
+        if not self.is_server:
+            return False
+        
         while True:
-            data, addr = self.sock.recvfrom(1024)
-            packet = TRUPacket.deserialize(data)
-            
-            if packet.packet_type == PacketType.SYN:
-                syn_ack_packet = TRUPacket(
-                    seq_num=self.next_seq,
-                    ack_num=packet.seq_num + 1,
-                    packet_type=PacketType.SYN_ACK,
-                    timestamp=time.time()
-                )
-                self.next_seq += 1
-                self._send_packet(syn_ack_packet, addr)
+            try:
+                data, addr = self.sock.recvfrom(1024)
+                packet = TRUPacket.deserialize(data)
                 
-                self.sock.settimeout(5.0)
-                try:
-                    data, _ = self.sock.recvfrom(1024)
-                    ack_packet = TRUPacket.deserialize(data)
+                if packet.packet_type == PacketType.SYN:
+                    self.peer_addr = addr
+
+                    syn_ack_packet = TRUPacket(
+                        seq_num=self.next_seq,
+                        ack_num=packet.seq_num + 1,
+                        packet_type=PacketType.SYN_ACK,
+                        timestamp=time.time()
+                    )
+                    self.next_seq += 1
+                    self._send_packet(syn_ack_packet.serialize(), addr)
                     
-                    if ack_packet.packet_type == PacketType.ACK:
-                        self.peer_addr = addr
-                        self.connected = True
-                        self.base_seq = ack_packet.seq_num
-                        return True
+                    self.sock.settimeout(5.0)
+                    try:
+                        data, _ = self.sock.recvfrom(1024)
+                        ack_packet = TRUPacket.deserialize(data)
                         
-                except socket.timeout:
-                    continue
+                        if ack_packet.packet_type == PacketType.ACK:
+                            self.connected = True
+                            self.base_seq = ack_packet.seq_num
+                            return True
+                            
+                    except socket.timeout:
+                        continue
+            except Exception as e:
+                print(f"Accept error: {e}")
+                return False
+    
+    def send_data(self, data: bytes, progress_cb=None) -> bool:
+        if not self.connected or not self.peer_addr:
+            return False
+            
+        segments = []
+        for i in range(0, len(data), MSS):
+            segment = data[i:i+MSS]
+            segments.append(segment)
+            
+        total_segments = len(segments)
+        
+        for i, segment in enumerate(segments):
+            while len(self.send_buffer) >= self.window_size:
+                time.sleep(0.01)
+                
+            packet = TRUPacket(
+                seq_num=self.next_seq,
+                packet_type=PacketType.DATA,
+                data=segment,
+                timestamp=time.time()
+            )
+            self.next_seq += len(segment)
+            
+            self.send_buffer[packet.seq_num] = (packet, time.time(), 0)
+            self._send_raw(packet.serialize(), self.peer_addr)
+            
+            self.congestion.on_packet_sent()
+            
+            if progress_cb:
+                progress_cb(i+1, total_segments)
+                
+        start_time = time.time()
+        while self.send_buffer and time.time() - start_time < 30.0:
+            time.sleep(0.1)
+            
+        return len(self.send_buffer) == 0
+
+    def recv_data(self, expected_segments: int, progress_cb=None) -> bytes:
+        data = b''
+        received_segments = 0
+        start_time = time.time()
+        
+        while received_segments < expected_segments and time.time() - start_time < 30.0:
+            if self.app_queue:
+                segment = self.app_queue.pop(0)
+                data += segment
+                received_segments += 1
+                
+                if progress_cb:
+                    progress_cb(received_segments, expected_segments)
+            else:
+                time.sleep(0.01)
+                
+        return data
