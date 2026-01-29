@@ -19,9 +19,11 @@ class TRUProtocol:
         self.crypto = TRUCrypto()
         self.encryption_enabled = False
         self.encryption_key = None
+        self.timer_thread = None
+        self.timeout_interval = 2.0
 
         #socket udp
-        self.sock = socket.socket(socket.AF_INET, sock.SOCK_DGRAM)
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         if is_server:
             self.sock.bind((host, port))
 
@@ -61,6 +63,30 @@ class TRUProtocol:
         self.receiver_thread = threading.Thread(target=self._receiver_loop)
         self.receiver_thread.daemon = True
         self.receiver_thread.start()
+        self.timer_thread = threading.Thread(target=self._timer_loop)
+        self.timer_thread.daemon = True
+        self.timer_thread.start()
+
+    def _timer_loop(self):
+        while self.running:
+            current_time = time.time()
+            
+            retransmit = []
+            for seq, (packet, sent_time, retries) in list(self.send_buffer.items()):
+                if current_time - sent_time > self.timeout_interval:
+                    if retries < 3:
+                        retransmit.append(seq)
+                    else:
+                        del self.send_buffer[seq]
+                        
+            for seq in retransmit:
+                packet, sent_time, retries = self.send_buffer[seq]
+                print(f"Retransmitting packet {seq} (retry {retries + 1})")
+                self._send_raw(packet.serialize(), self.peer_addr)
+                self.send_buffer[seq] = (packet, current_time, retries + 1)
+                self.congestion.on_timeout()
+                
+            time.sleep(0.1)
 
     def _receiver_loop(self):
         while self.running:
@@ -225,8 +251,8 @@ class TRUProtocol:
                 packet_type=PacketType.FIN,
                 timestamp=time.time()
             )
-            self._send_raw(fin_packet.serialize(), self.peer_addr)
             self.next_seq += 1
+            self._send_raw(fin_packet.serialize(), self.peer_addr)
 
             try:
                 self.sock.settimeout(2.0)
@@ -241,6 +267,9 @@ class TRUProtocol:
         self.running = False
         if self.receiver_thread:
             self.receiver_thread.join(timeout=1.0)
+        if self.timer_thread:
+            self.timer_thread.join(timeout=1.0)
+
         self.sock.close()
         self.connected = False
 
@@ -260,7 +289,7 @@ class TRUProtocol:
             timestamp=time.time()
         )
         self.next_seq += 1
-        self.__send_raw(syn_packet.serialize(), self.peer_addr)
+        self._send_raw(syn_packet.serialize(), self.peer_addr)
 
         #espera SYN-ACK
         start_time = time.time()
