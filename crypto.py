@@ -2,6 +2,7 @@ import os
 import random
 import hashlib
 import hmac
+import random
 from typing import Tuple, Optional
 
 class TRUCrypto:
