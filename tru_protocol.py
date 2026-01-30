@@ -59,11 +59,16 @@ class TRUProtocol:
 
         self.sock.settimeout(1.0)
 
+        # seq numbers (definir antes de ack_num)
+        self.base_seq = random.randint(0, 2**31 - 1)
+        self.next_seq = self.base_seq
         self.ack_num = self.base_seq
+        self.ack_sum = 0
+
         self.send_window = []
         self.received_segments = set()
         
-        #status connection
+        # status connection
         self.connected = False
         self.peer_addr = None
         
@@ -78,7 +83,7 @@ class TRUProtocol:
         self.congestion = CongestionControl()
         
         #thread control
-        self.receive_thread = None
+        self.receiver_thread = None
         self.running = False
         
         #queue
@@ -174,7 +179,7 @@ class TRUProtocol:
             timestamp=time.time()
         )
         self.next_seq += 1
-        self._send_raw(syn_ack_packet.serialize(), addr)
+        self._send_raw(syn_ack_packet, addr)
         
         self.peer_addr = addr
 
@@ -189,7 +194,7 @@ class TRUProtocol:
                 packet_type=PacketType.ACK,
                 timestamp=time.time()
             )
-            self._send_raw(ack_packet.serialize(), self.peer_addr)
+            self._send_raw(ack_packet, self.peer_addr)
             
             self.connected = True
             self.base_seq = packet.ack_num
@@ -348,7 +353,7 @@ class TRUProtocol:
             timestamp=time.time()
         )
         self.next_seq += 1
-        self._send_raw(fin_ack_packet.serialize(), self.peer_addr)
+        self._send_raw(fin_ack_packet, self.peer_addr)
         
         self.connected = False
         print(f"Connection closed by peer {self.peer_addr}")
@@ -375,7 +380,7 @@ class TRUProtocol:
             while len(self.send_window) >= self.window_size:
                 time.sleep(0.1)
             self.send_window.append(packet)
-            self._send_raw(packet.serialize(), self.peer_addr)
+            self._send_raw(packet, self.peer_addr)
 
         return True
 
@@ -421,8 +426,14 @@ class TRUProtocol:
         self.sock.close()
         self.connected = False
 
-    def _send_raw(self, data: bytes, addr: Tuple[str, int]):
+    def _send_raw(self, packet_or_bytes, addr: Tuple[str, int]):
         try:
+            if isinstance(packet_or_bytes, TRUPacket):
+                packet_or_bytes.checksum = packet_or_bytes.calculate_checksum()
+                data = packet_or_bytes.serialize()
+            else:
+                data = packet_or_bytes
+                
             self.sock.sendto(data, addr)
         except Exception as e:
             print(f"Erro ao enviar dados: {e}")
@@ -535,6 +546,14 @@ class TRUProtocol:
                     ack_packet = TRUPacket.deserialize(data)
 
                     print(f"[ACCEPT] Pacote ACK recebido: seq={ack_packet.seq_num}, ack={ack_packet.ack_num}")
+                    syn_ack_packet = TRUPacket(
+                        seq_num=self.next_seq,
+                        ack_num=packet.seq_num + 1,
+                        packet_type=PacketType.SYN_ACK,
+                        timestamp=time.time()
+                    )
+                    self.next_seq += 1
+                    self._send_raw(syn_ack_packet, addr)
                     
                     if (ack_packet.packet_type == PacketType.ACK and
                         ack_packet.ack_num == syn_ack_packet.seq_num + 1):
@@ -565,6 +584,29 @@ class TRUProtocol:
             print(f"Accept error: {e}")
 
         return False
+                        if ack_packet.packet_type == PacketType.ACK:
+                            self.connected = True
+                            self.base_seq = ack_packet.seq_num
+                            self.ack_num = ack_packet.seq_num  # próximo seq esperado do cliente
+                            return True
+                            
+                    except socket.timeout:
+                        # Timeout esperando ACK; voltar a esperar novo SYN (resetar timeout)
+                        self.sock.settimeout(1.0)
+                        continue
+                    except ValueError:
+                        # Pacote inválido (ex.: pequeno demais); ignorar e voltar a esperar SYN
+                        self.sock.settimeout(1.0)
+                        continue
+            except socket.timeout:
+                # Timeout esperando SYN; continuar ouvindo (não encerrar)
+                continue
+            except ValueError:
+                # Pacote inválido (ICMP, lixo, etc.); ignorar e continuar ouvindo
+                continue
+            except Exception as e:
+                print(f"Accept error: {e}")
+                return False
     
     def send_data(self, data: bytes, progress_cb=None) -> bool:
         if not self.connected or not self.peer_addr:
@@ -711,6 +753,8 @@ class TRUProtocol:
                         print(f"[KEY-EXCHANGE] Segredo compartilhado calculado")
                         self.encryption_key, _ = self.crypto.derive_key(shared)
                         self.encryption_enabled = True
+                        # Cliente enviou 1 "segmento" (DH); próximo dado terá seq_num = packet.seq_num + 1
+                        self.ack_num = packet.seq_num + 1
                         
                         response = f"DH:{server_public}".encode()
                         resp_packet = TRUPacket(
