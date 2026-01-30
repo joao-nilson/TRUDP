@@ -24,7 +24,7 @@ class TRUPacket:
     timestamp: float = 0.0
     data: bytes = b''
 
-    HEADER_SIZE = 25    #seq(4) + ack(4) + type(1) + window(2) + checksum(4) + timestamp(8)
+    HEADER_SIZE = 23   #seq(4) + ack(4) + type(1) + window(2) + checksum(4) + timestamp(8)
 
     def serialize(self) -> bytes:
         header = struct.pack('!IIBHIQ',
@@ -39,6 +39,8 @@ class TRUPacket:
     @classmethod
     def deserialize(cls, data: bytes) -> 'TRUPacket':
         if len(data) < cls.HEADER_SIZE:
+            print(f"[DEBUG] Pacote muito pequeno: {len(data)} bytes, esperado {cls.HEADER_SIZE}")
+            print(f"[DEBUG] Dados: {data.hex()}")
             raise ValueError("Pacote pequeno demais")
 
         header = data[:cls.HEADER_SIZE]

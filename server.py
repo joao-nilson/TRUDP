@@ -54,7 +54,7 @@ def main():
     p = argparse.ArgumentParser(description='Servidor TRUDP - recebe dados do cliente')
     p.add_argument('--host', default='0.0.0.0', help='Interface de escuta')
     p.add_argument('--port', type=int, default=5000, help='Porta de escuta')
-    p.add_argument('--packets', type=int, default=10000,
+    p.add_argument('--packets', type=int, default=10,
                    help='Número de pacotes a receber (deve bater com o cliente). Default: 10000')
     p.add_argument('--loss', type=float, default=0.0, metavar='P',
                    help='Probabilidade de descartar cada pacote recebido (0.0 a 1.0). '
@@ -69,11 +69,9 @@ def main():
 
     set_global_loss_probability(args.loss)
     loss_p = args.loss
-    total_segments = max(args.packets, 10000)
+    total_segments = args.packets
 
     conn = TRUProtocol(host=args.host, port=args.port, is_server=True, loss_callback=loss_filter)
-
-    conn.start()
 
     conn.receive_stats = {
         'received': 0,
@@ -91,8 +89,9 @@ def main():
         sys.exit(1)
     print('Handshake OK.')
 
-    conn.do_key_exchange_as_server()
-    print('Criptografia acordada (chave enviada ao cliente).')
+    # conn.do_key_exchange_as_server()
+    # print('Criptografia acordada (chave enviada ao cliente).')
+    print('Criptografia desabilitada para testes.')
 
     monitor_thread = None
     if args.monitor:

@@ -22,18 +22,19 @@ class TRUProtocol:
         self.encryption_enabled = False
         self.encryption_key = None
         self.timer_thread = None
-        self.timeout_interval = 1.0
 
         # RTT
         self.rtt_samples = []  # Store RTT samples for moving average
-        self.rtt_avg = 0.5     # Initial RTT estimate (seconds)
-        self.rtt_dev = 0.25    # Initial RTT deviation
+        self.rtt_avg = 0.0     # Initial RTT estimate (seconds)
+        self.rtt_dev = 0.1    # Initial RTT deviation
         self.rtt_alpha = 0.125  # Weight for moving average (RFC 6298)
         self.rtt_beta = 0.25   # Weight for deviation (RFC 6298)
-        self.min_rtt = 0.1     # Minimum RTT (100ms)
+        self.min_rtt = 0.001     # Minimum RTT (100ms)
         self.max_rtt = 2.0     # Maximum RTT (2 seconds)
 
         self.sent_times = {}
+
+        self.timeout_interval = 1.0
 
         # RTT monitoring
         self.monitoring_active = False
@@ -121,21 +122,31 @@ class TRUProtocol:
         while self.running:
             try:
                 data, addr = self.sock.recvfrom(2048)
-                packet = TRUPacket.deserialize(data)
+                if not data:
+                    continue
+                try:
+                    packet = TRUPacket.deserialize(data)
+                except Exception as e:
+                    continue
                 self._process_packet(packet, addr)
             except socket.timeout:
                 continue
             except Exception as e:
                 print(f"Receiver erro: {e}")
+                if self.running:
+                    time.sleep(0.1)
                 continue
 
     def _process_packet(self, packet: TRUPacket, addr: Tuple[str, int]):
         if not self.peer_addr:
+            print(f"[PROCESS] Definindo peer_addr para {addr}")
             self.peer_addr = addr
 
         if self.loss_callback and self.loss_callback(packet.seq_num):
             print(f"Packet {packet.seq_num} dropped")
             return
+
+        print(f"[PROCESS] Processando pacote tipo={packet.packet_type}, seq={packet.seq_num}, ack={packet.ack_num}")
 
         if packet.packet_type == PacketType.ACK:
             self._handle_ack(packet)
@@ -149,6 +160,8 @@ class TRUProtocol:
             self._handle_fin(packet)
         elif packet.packet_type == PacketType.FIN_ACK:
             self._handle_fin_ack()
+        else:
+            print(f"[PROCESS] Tipo de pacote desconhecido: {packet.packet_type}")
 
     def _handle_syn(self, packet: TRUPacket, addr: Tuple[str, int]):
         if self.connected:
@@ -184,13 +197,16 @@ class TRUProtocol:
             print(f"Connection established with {self.peer_addr}")
 
     def _handle_ack(self, packet: TRUPacket):
+        print(f"[HANDLE_ACK] Recebido ACK para pacote {packet.ack_num}")
         ack_num = packet.ack_num
         current_time = time.time()
 
+        acked_seqs = []
         for seq in list(self.send_buffer.keys()):
             if seq < ack_num:
                 if seq in self.sent_times:
                     rtt_sample = current_time - self.sent_times[seq]
+                    print(f"[HANDLE_ACK] Calculando RTT para seq={seq}: {rtt_sample:.3f}s")
 
                     if self.min_rtt <= rtt_sample <= self.max_rtt:
                         self._update_rtt(rtt_sample)
@@ -198,34 +214,45 @@ class TRUProtocol:
                     del self.sent_times[seq]
 
                 del self.send_buffer[seq]
+                acked_seqs.append(seq)
+        
+        if acked_seqs:
+            print(f"[HANDLE_ACK] ACKs confirmados: {acked_seqs}")
+        else:
+            print(f"[HANDLE_ACK] Nenhum pacote confirmado por este ACK")
 
         self.congestion.on_ack_received()
         self.window_size = self.congestion.get_window_size()
         self.timeout_interval = self._calculate_timeout()
     
     def _update_rtt(self, sample: float):
+        print(f"[UPDATE_RTT] Nova amostra RTT: {sample:.6f}s")
+
         if self.rtt_avg == 0:
             self.rtt_avg = sample
             self.rtt_dev = sample / 2
+            print(f"[UPDATE_RTT] Primeira amostra: avg={self.rtt_avg:.6f}, dev={self.rtt_dev:.6f}")
         else:
-            self.rtt_dev = (1 - self.rtt_beta) * self.rtt_dev + \
-                          self.rtt_beta * abs(sample - self.rtt_avg)
-            self.rtt_avg = (1 - self.rtt_alpha) * self.rtt_avg + \
-                          self.rtt_alpha * sample
+            error = sample - self.rtt_avg
+            self.rtt_dev = (1 - self.rtt_beta) * self.rtt_dev + self.rtt_beta * abs(error)
+            self.rtt_avg = (1 - self.rtt_alpha) * self.rtt_avg + self.rtt_alpha * sample
+            print(f"[UPDATE_RTT] Atualizado: avg={self.rtt_avg:.6f}, dev={self.rtt_dev:.6f}, erro={error:.6f}")
         
         self.rtt_samples.append(sample)
         if len(self.rtt_samples) > 10:
             self.rtt_samples.pop(0)
         
-        if len(self.rtt_samples) % 5 == 0:
-            print(f"RTT: avg={self.rtt_avg:.3f}s, dev={self.rtt_dev:.3f}s, "
-                  f"samples={len(self.rtt_samples)}")
+        print(f"[UPDATE_RTT] Total de amostras: {len(self.rtt_samples)}")
+        
+    
 
     def _calculate_timeout(self) -> float:
         timeout = self.rtt_avg + 4 * max(self.rtt_dev, 0.01)
         
-        timeout = max(timeout, 0.5)   # Mínimo 500ms
+        timeout = max(timeout, 0.1)   # Mínimo 100ms
         timeout = min(timeout, 10.0)  # Máximo 10s
+
+        print(f"[CALC_TIMEOUT] RTT_avg={self.rtt_avg:.6f}, RTT_dev={self.rtt_dev:.6f}, timeout={timeout:.3f}s")
         
         return timeout
     
@@ -244,7 +271,10 @@ class TRUProtocol:
 
 
     def _handle_data(self, packet: TRUPacket, addr: Tuple[str, int]):
+        print(f"[HANDLE_DATA] Recebido pacote DATA, seq={packet.seq_num}, tamanho={len(packet.data)}")
+        
         if packet.seq_num in self.received_segments:
+            print(f"[HANDLE_DATA] Pacote duplicado {packet.seq_num}")
             self.receive_stats['duplicates'] += 1
             ack_packet = TRUPacket(
                 seq_num=0,
@@ -266,26 +296,33 @@ class TRUProtocol:
             packet_type=PacketType.ACK,
             timestamp=time.time()
         )
+        print(f"[HANDLE_DATA] Enviando ACK para seq={packet.seq_num + len(packet.data)}")
+
         self._send_raw(ack_packet.serialize(), addr)
         self.receive_stats['acks_sent'] += 1
 
         self._deliver_data()
     
     def get_rtt_stats(self) -> dict:
+        print(f"[GET_RTT_STATS] Chamado. Amostras: {self.rtt_samples}, média: {self.rtt_avg:.6f}")
+
         if not self.rtt_samples:
             return {
                 'avg': 0,
                 'min': 0,
                 'max': 0,
-                'dev': 0,
+                'dev': self.rtt_dev,
                 'timeout': self.timeout_interval,
                 'samples': 0
             }
         
+        min_rtt = min(self.rtt_samples)
+        max_rtt = max(self.rtt_samples)
+
         return {
             'avg': self.rtt_avg,
-            'min': min(self.rtt_samples) if self.rtt_samples else 0,
-            'max': max(self.rtt_samples) if self.rtt_samples else 0,
+            'min': min_rtt,
+            'max': max_rtt,
             'dev': self.rtt_dev,
             'timeout': self._calculate_timeout(),
             'samples': len(self.rtt_samples)
@@ -394,26 +431,33 @@ class TRUProtocol:
         self.peer_addr = (host, port)
         print(f"[CONNECT] Conectando a {host}:{port}")
 
-        #SYN
-        syn_packet = TRUPacket(
-            seq_num=self.next_seq,
-            packet_type=PacketType.SYN, 
-            timestamp=time.time()
-        )
-        self.next_seq += 1
-        print(f"[CONNECT] Enviando SYN, seq={syn_packet.seq_num}")
-        self._send_raw(syn_packet.serialize(), self.peer_addr)
+        for attempt in range(3):
+            print(f"[CONNECT] Tentativa {attempt + 1}/3")
 
-        #espera SYN-ACK
-        start_time = time.time()
-        self.sock.settimeout(5.0)
+            #SYN
+            syn_packet = TRUPacket(
+                seq_num=self.base_seq,
+                packet_type=PacketType.SYN, 
+                timestamp=time.time()
+            )
+            self.next_seq += 1
+            print(f"[CONNECT] Enviando SYN, seq={syn_packet.seq_num}")
+            self._send_raw(syn_packet.serialize(), self.peer_addr)
 
-        while time.time() - start_time < 5.0:
+            #espera SYN-ACK
+            self.sock.settimeout(2.0)
+
             try:
                 data, addr = self.sock.recvfrom(1024)
-                packet = TRUPacket.deserialize(data)
+                print(f"[CONNECT] Recebido {len(data)} bytes de {addr}")
 
-                print(f"[CONNECT] Pacote recebido: tipo={packet.packet_type}, de={addr}")
+                try:
+                    packet = TRUPacket.deserialize(data)
+                except ValueError as e:
+                    print(f"[CONNECT] Erro deserializando: {e}")
+                    continue
+
+                print(f"[CONNECT] Pacote recebido: tipo={packet.packet_type}, seq={packet.seq_num}, ack={packet.ack_num}")
 
                 if (packet.packet_type == PacketType.SYN_ACK and
                     packet.ack_num == syn_packet.seq_num + 1):
@@ -430,15 +474,17 @@ class TRUProtocol:
                     print(f"[CONNECT] Enviando ACK, seq={ack_packet.seq_num}, ack={ack_packet.ack_num}")
 
                     self.connected = True
-                    self.base_seq = packet.ack_num
                     self.next_seq = packet.ack_num
-                    print("[CONNECT] Handshake completado com sucesso")
+                    print("[CONNECT] Handshake completado. Conectado a {self.peer_addr}")
                     return True
                 else:
                     print(f"[CONNECT] Pacote não é SYN-ACK correto")
 
             except socket.timeout:
-                print("[CONNECT] Timeout esperando SYN-ACK")
+                print("[CONNECT] Timeout tentativa {attempt + 1}")
+                continue
+            except Exception as e:
+                print(f"[CONNECT] Erro: {e}")
                 continue
         
         print("[CONNECT] Falha no handshake - timeout")
@@ -449,54 +495,75 @@ class TRUProtocol:
             return False
         
         print("[ACCEPT] Aguardando conexão...")
-        self.sock.settimeout(10.0)
+        self.sock.settimeout(30.0)
 
-        while True:
+        try:
+            data, addr = self.sock.recvfrom(1024)
+            print(f"[ACCEPT] Recebido {len(data)} bytes de {addr}")
+
             try:
-                data, addr = self.sock.recvfrom(1024)
                 packet = TRUPacket.deserialize(data)
-
-                print(f"[ACCEPT] Pacote recebido: tipo={packet.packet_type}, de={addr}")
-                
-                if packet.packet_type == PacketType.SYN:
-                    print(f"[ACCEPT] SYN recebido de {addr}, seq={packet.seq_num}")
-                    self.peer_addr = addr
-
-                    syn_ack_packet = TRUPacket(
-                        seq_num=self.next_seq,
-                        ack_num=packet.seq_num + 1,
-                        packet_type=PacketType.SYN_ACK,
-                        timestamp=time.time()
-                    )
-                    self.next_seq += 1
-                    print(f"[ACCEPT] Enviando SYN-ACK, seq={syn_ack_packet.seq_num}, ack={syn_ack_packet.ack_num}")
-                    self._send_raw(syn_ack_packet.serialize(), addr)
-                    
-                    self.sock.settimeout(5.0)
-                    try:
-                        data, _ = self.sock.recvfrom(1024)
-                        ack_packet = TRUPacket.deserialize(data)
-
-                        print(f"[ACCEPT] Pacote ACK recebido: seq={ack_packet.seq_num}, ack={ack_packet.ack_num}")
-                        
-                        if ack_packet.packet_type == PacketType.ACK:
-                            self.connected = True
-                            self.base_seq = ack_packet.seq_num
-                            self.next_seq = ack_packet.seq_num
-                            print("[ACCEPT] Handshake completado com sucesso")
-                            return True
-                        else:
-                            print(f"[ACCEPT] Pacote não é ACK: tipo={ack_packet.packet_type}")
-                            
-                    except socket.timeout:
-                        print("[ACCEPT] Timeout esperando ACK")
-                        continue
-            except socket.timeout:
-                print("[ACCEPT] Timeout aguardando SYN")
-                continue
-            except Exception as e:
-                print(f"Accept error: {e}")
+            except ValueError as e:
+                print(f"[ACCEPT] Erro deserializando SYN: {e}")
                 return False
+
+            print(f"[ACCEPT] Pacote recebido: tipo={packet.packet_type}, seq={packet.seq_num}")
+            
+            if packet.packet_type == PacketType.SYN:
+                print(f"[ACCEPT] SYN recebido de {addr}, seq={packet.seq_num}")
+                self.peer_addr = addr
+
+                syn_ack_packet = TRUPacket(
+                    seq_num=self.next_seq,
+                    ack_num=packet.seq_num + 1,
+                    packet_type=PacketType.SYN_ACK,
+                    timestamp=time.time()
+                )
+                self.next_seq += 1
+                print(f"[ACCEPT] Enviando SYN-ACK, seq={syn_ack_packet.seq_num}, ack={syn_ack_packet.ack_num}")
+                self._send_raw(syn_ack_packet.serialize(), addr)
+
+                # PARAR temporariamente a thread de recepção para não interferir
+                if self.running:
+                    self.running = False
+                    if self.receiver_thread:
+                        self.receiver_thread.join(timeout=1.0)
+                
+                self.sock.settimeout(10.0)
+                try:
+                    data, _ = self.sock.recvfrom(1024)
+                    ack_packet = TRUPacket.deserialize(data)
+
+                    print(f"[ACCEPT] Pacote ACK recebido: seq={ack_packet.seq_num}, ack={ack_packet.ack_num}")
+                    
+                    if (ack_packet.packet_type == PacketType.ACK and
+                        ack_packet.ack_num == syn_ack_packet.seq_num + 1):
+
+                        self.connected = True
+                        self.next_seq = ack_packet.seq_num
+                        print("[ACCEPT] Handshake completado com sucesso, Cliente {addr} conectado")
+                        
+                        self.running = True
+                        self.receiver_thread = threading.Thread(target=self._receiver_loop)
+                        self.receiver_thread.daemon = True
+                        self.receiver_thread.start()
+
+                        return True
+                    else:
+                        print(f"[ACCEPT] Pacote não é ACK: tipo={ack_packet.packet_type}")
+                        
+                except socket.timeout:
+                    print("[ACCEPT] Timeout esperando ACK")
+                except ValueError as e:
+                    print(f"[ACCEPT] Erro deserializando ACK: {e}")
+            else:
+                print(f"[ACCEPT] Pacote não é SYN")
+
+        except socket.timeout:
+            print("[ACCEPT] Timeout aguardando SYN")
+        except Exception as e:
+            print(f"Accept error: {e}")
+
         return False
     
     def send_data(self, data: bytes, progress_cb=None) -> bool:

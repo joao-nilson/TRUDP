@@ -15,31 +15,27 @@ def monitor_rtt(conn, interval=5.0):
                 # Obter estatísticas de RTT
                 stats = conn.get_rtt_stats()
                 
-                if stats['samples'] > 0:
-                    print(f"[RTT] Média: {stats['avg']:.3f}s | "
-                          f"Mín: {stats['min']:.3f}s | "
-                          f"Máx: {stats['max']:.3f}s | "
-                          f"Desvio: {stats['dev']:.3f}s | "
-                          f"Timeout: {stats['timeout']:.3f}s | "
-                          f"Amostras: {stats['samples']}")
-                else:
-                    print(f"[RTT] Aguardando amostras... | "
-                          f"Timeout atual: {stats['timeout']:.3f}s")
+                print(f"\n[RTT STATS {time.strftime('%H:%M:%S')}]")
+                print(f"  Média: {stats['avg']:.6f}s")
+                print(f"  Min/Max: {stats['min']:.6f}s / {stats['max']:.6f}s")
+                print(f"  Desvio: {stats['dev']:.6f}s")
+                print(f"  Timeout: {stats['timeout']:.3f}s")
+                print(f"  Amostras: {stats['samples']}")
                 
+                # Estatísticas de congestionamento
                 if hasattr(conn, 'get_congestion_stats'):
-                    congestion_stats = conn.get_congestion_stats()
-                    print(f"[Congestion] Janela: {congestion_stats.get('window', 0)} | "
-                          f"cwnd: {congestion_stats.get('cwnd', 0):.1f} | "
-                          f"ssthresh: {congestion_stats.get('ssthresh', 0):.1f} | "
-                          f"Estado: {congestion_stats.get('state', 'N/A')}")
+                    cstats = conn.get_congestion_stats()
+                    print(f"\n[CONGESTION STATS]")
+                    print(f"  Estado: {cstats.get('state', 'N/A')}")
+                    print(f"  cwnd: {cstats.get('cwnd', 0):.2f}")
+                    print(f"  ssthresh: {cstats.get('ssthresh', 0):.2f}")
+                    print(f"  Janela: {cstats.get('window', 0)}")
+                    print(f"  Dup ACKs: {cstats.get('dup_acks', 0)}")
                 
-                print("-" * 80)
-                
+                print("-" * 60)
+
             except AttributeError as e:
-                print(f"[Monitor] Erro ao obter estatísticas: {e}")
-                break
-            except Exception as e:
-                print(f"[Monitor] Erro inesperado: {e}")
+                print(f"[Monitor] Erro: {e}")
                 break
             
             time.sleep(interval)
@@ -53,7 +49,7 @@ def main():
     p = argparse.ArgumentParser(description='Cliente TRUDP - envia dados ao servidor')
     p.add_argument('--host', default='127.0.0.1', help='Endereço do servidor')
     p.add_argument('--port', type=int, default=5000, help='Porta do servidor')
-    p.add_argument('--packets', type=int, default=10000,
+    p.add_argument('--packets', type=int, default=10,
                    help='Número de pacotes a enviar (≥10000 para avaliação). Default: 10000')
     p.add_argument('--loss', type=float, default=0.0, metavar='P',
                    help='Probabilidade de perda de pacotes (para testes). Default: 0.0')
@@ -71,7 +67,7 @@ def main():
         set_global_loss_probability(args.loss)
         print(f"Perda de pacotes configurada: {args.loss*100:.1f}%")
 
-    total_packets = max(args.packets, 10000) if args.packets else 10000
+    total_packets = args.packets
     total_bytes = total_packets * MSS
 
     if args.file:
@@ -83,12 +79,14 @@ def main():
             else:
                 payload = payload[:total_bytes]
             total_packets = (len(payload) + MSS - 1) // MSS
+            print(f"Lendo arquivo: {len(payload)} bytes, {total_packets} pacotes")
         except Exception as e:
             print(f'Erro ao abrir arquivo: {e}', file=sys.stderr)
             sys.exit(1)
     else:
         # Dados sintéticos (preenchimento do payload)
         payload = bytes((i % 256) for i in range(total_bytes))
+        print(f"Gerando {total_packets} pacotes ({total_bytes} bytes)")
 
     conn = TRUProtocol(is_server=False)
     conn.start()
@@ -99,11 +97,12 @@ def main():
         sys.exit(1)
     print('Handshake OK.')
 
-    if not conn.do_key_exchange_as_client():
-        print('Falha no acordo de criptografia.', file=sys.stderr)
-        conn.close()
-        sys.exit(1)
-    print('Criptografia acordada.')
+    # if not conn.do_key_exchange_as_client():
+    #     print('Falha no acordo de criptografia.', file=sys.stderr)
+    #     conn.close()
+    #     sys.exit(1)
+    # print('Criptografia acordada.')
+    print('Criptografia desabilitada para testes.')
 
     monitor_thread = None
     if args.monitor:
