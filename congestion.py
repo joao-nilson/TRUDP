@@ -14,10 +14,15 @@ class CongestionControl:
         self.rtt_avg = 0.5
         self.rtt_var = 0.5
 
+        self.timeout_interval = 1.0
+
     def on_packet_sent(self, seq_num: int = None):
         pass
 
-    def on_ack_received(self, ack_num: int = None):
+    def on_ack_received(self, ack_num: int = None, rtt_sample: float = None):
+        if rtt_sample is not None:
+            self.update_rtt(rtt_sample)
+
         if ack_num is not None and ack_num <= self.last_ack:
             self.dup_ack_count += 1
             if self.dup_ack_count >= 3:
@@ -43,6 +48,7 @@ class CongestionControl:
         self.cwnd = 1.0
         self.state = "SLOW_START"
         self.dup_ack_count = 0
+        self.timeout_interval = min(self.timeout_interval * 2, 60.0)
 
     def on_three_duplicate_acks(self):
         self.ssthresh = max(self.cwnd / 2, 2.0)
@@ -53,17 +59,27 @@ class CongestionControl:
         return int(self.cwnd)
     
     def update_rtt(self, sample: float):
+        if self.rtt_samples:
+            error = sample - self.rtt_avg
+            self.rtt_avg = self.rtt_avg + 0.125 * error
+            self.rtt_var = 0.75 * self.rtt_var + 0.25 * abs(error)
+        else:
+            self.rtt_avg = sample
+            self.rtt_var = sample / 2
+
         self.rtt_samples.append(sample)
         if len(self.rtt_samples) > 10:
             self.rtt_samples.pop(0)
             
-        if self.rtt_samples:
-            self.rtt_avg = sum(self.rtt_samples) / len(self.rtt_samples)
-            self.rtt_min = min(self.rtt_samples)
-            
-            variances = [(r - self.rtt_avg) ** 2 for r in self.rtt_samples]
-            self.rtt_var = sum(variances) / len(variances) if variances else 0.5
+        if sample < self.rtt_min or self.rtt_min == 0.1:
+            self.rtt_min = sample
+
+        self.timeout_interval = self.get_timeout_interval()
             
     def get_timeout_interval(self) -> float:
-        """Get timeout interval based on estimated RTT"""
-        return max(self.rtt_avg + 4 * max(self.rtt_var, 0.01), 1.0)
+        timeout = self.rtt_avg + 4 * max(self.rtt_var, 0.01)
+        
+        timeout = max(timeout, 0.5)   # Mínimo 500ms
+        timeout = min(timeout, 30.0)  # Máximo 30s
+        
+        return timeout

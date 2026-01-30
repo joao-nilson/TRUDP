@@ -6,6 +6,8 @@ from typing import Optional, Tuple, Callable, List
 from congestion import CongestionControl
 from crypto import TRUCrypto
 import random
+import statistics
+import time
 
 MSS = 1400
 
@@ -20,7 +22,34 @@ class TRUProtocol:
         self.encryption_enabled = False
         self.encryption_key = None
         self.timer_thread = None
-        self.timeout_interval = 2.0
+        self.timeout_interval = 1.0
+
+        # RTT
+        self.rtt_samples = []  # Store RTT samples for moving average
+        self.rtt_avg = 0.5     # Initial RTT estimate (seconds)
+        self.rtt_dev = 0.25    # Initial RTT deviation
+        self.rtt_alpha = 0.125  # Weight for moving average (RFC 6298)
+        self.rtt_beta = 0.25   # Weight for deviation (RFC 6298)
+        self.min_rtt = 0.1     # Minimum RTT (100ms)
+        self.max_rtt = 2.0     # Maximum RTT (2 seconds)
+
+        self.sent_times = {}
+
+        # RTT monitoring
+        self.monitoring_active = False
+
+        self.receive_stats = {
+            'received': 0,
+            'duplicates': 0,
+            'acks_sent': 0
+        }
+
+        self.congestion_stats = {}
+       
+        #seq numbers
+        self.base_seq = random.randint(0, 2**31 -1)
+        self.next_seq = self.base_seq
+        self.ack_sum = 0
 
         #socket udp
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -37,10 +66,6 @@ class TRUProtocol:
         self.connected = False
         self.peer_addr = None
         
-        #seq numbers
-        self.base_seq = random.randint(0, 2**31 -1)
-        self.next_seq = self.base_seq
-        self.ack_sum = 0
         
         #buffers
         self.send_buffer = {} # seq -> packet, sent_time, retries
@@ -70,18 +95,22 @@ class TRUProtocol:
     def _timer_loop(self):
         while self.running:
             current_time = time.time()
-            
             retransmit = []
+
+            timeout = self._calculate_timeout()
+
             for seq, (packet, sent_time, retries) in list(self.send_buffer.items()):
-                if current_time - sent_time > self.timeout_interval:
+                if current_time - sent_time > timeout:
                     if retries < 3:
                         retransmit.append(seq)
                     else:
                         del self.send_buffer[seq]
+                        if self.loss_callback:
+                            print(f"Packet {seq} dropped after {retries} retries")
                         
             for seq in retransmit:
                 packet, sent_time, retries = self.send_buffer[seq]
-                print(f"Retransmitting packet {seq} (retry {retries + 1})")
+                print(f"Retransmitting packet {seq} (retry {retries + 1}, RTO={timeout:.3f}s)")
                 self._send_raw(packet.serialize(), self.peer_addr)
                 self.send_buffer[seq] = (packet, current_time, retries + 1)
                 self.congestion.on_timeout()
@@ -156,29 +185,111 @@ class TRUProtocol:
 
     def _handle_ack(self, packet: TRUPacket):
         ack_num = packet.ack_num
+        current_time = time.time()
 
         for seq in list(self.send_buffer.keys()):
             if seq < ack_num:
+                if seq in self.sent_times:
+                    rtt_sample = current_time - self.sent_times[seq]
+
+                    if self.min_rtt <= rtt_sample <= self.max_rtt:
+                        self._update_rtt(rtt_sample)
+
+                    del self.sent_times[seq]
+
                 del self.send_buffer[seq]
 
         self.congestion.on_ack_received()
         self.window_size = self.congestion.get_window_size()
+        self.timeout_interval = self._calculate_timeout()
+    
+    def _update_rtt(self, sample: float):
+        if self.rtt_avg == 0:
+            self.rtt_avg = sample
+            self.rtt_dev = sample / 2
+        else:
+            self.rtt_dev = (1 - self.rtt_beta) * self.rtt_dev + \
+                          self.rtt_beta * abs(sample - self.rtt_avg)
+            self.rtt_avg = (1 - self.rtt_alpha) * self.rtt_avg + \
+                          self.rtt_alpha * sample
+        
+        self.rtt_samples.append(sample)
+        if len(self.rtt_samples) > 10:
+            self.rtt_samples.pop(0)
+        
+        if len(self.rtt_samples) % 5 == 0:
+            print(f"RTT: avg={self.rtt_avg:.3f}s, dev={self.rtt_dev:.3f}s, "
+                  f"samples={len(self.rtt_samples)}")
+
+    def _calculate_timeout(self) -> float:
+        timeout = self.rtt_avg + 4 * max(self.rtt_dev, 0.01)
+        
+        timeout = max(timeout, 0.5)   # Mínimo 500ms
+        timeout = min(timeout, 10.0)  # Máximo 10s
+        
+        return timeout
+    
+    def get_congestion_stats(self):
+        if hasattr(self, 'congestion'):
+            return {
+                'cwnd': self.congestion.cwnd,
+                'ssthresh': self.congestion.ssthresh,
+                'state': self.congestion.state,
+                'window': self.window_size,
+                'dup_acks': self.congestion.dup_ack_count,
+                'rtt_avg': getattr(self.congestion, 'rtt_avg', 0),
+                'timeout': getattr(self.congestion, 'timeout_interval', 0)
+            }
+        return {}
+
 
     def _handle_data(self, packet: TRUPacket, addr: Tuple[str, int]):
         if packet.seq_num in self.received_segments:
+            self.receive_stats['duplicates'] += 1
+            ack_packet = TRUPacket(
+                seq_num=0,
+                ack_num=packet.seq_num + len(packet.data),
+                packet_type=PacketType.ACK,
+                timestamp=time.time()
+            )
+            self._send_raw(ack_packet.serialize(), addr)
+            self.receive_stats['acks_sent'] += 1
             return
 
         self.receive_buffer[packet.seq_num] = packet.data
         self.received_segments.add(packet.seq_num)
+        self.receive_stats['received'] += 1
 
         ack_packet = TRUPacket(
-            packet_num=packet.seq_num + len(packet.data),
+            seq_num=0,
+            ack_num=packet.seq_num + len(packet.data),
             packet_type=PacketType.ACK,
             timestamp=time.time()
         )
         self._send_raw(ack_packet.serialize(), addr)
+        self.receive_stats['acks_sent'] += 1
 
         self._deliver_data()
+    
+    def get_rtt_stats(self) -> dict:
+        if not self.rtt_samples:
+            return {
+                'avg': 0,
+                'min': 0,
+                'max': 0,
+                'dev': 0,
+                'timeout': self.timeout_interval,
+                'samples': 0
+            }
+        
+        return {
+            'avg': self.rtt_avg,
+            'min': min(self.rtt_samples) if self.rtt_samples else 0,
+            'max': max(self.rtt_samples) if self.rtt_samples else 0,
+            'dev': self.rtt_dev,
+            'timeout': self._calculate_timeout(),
+            'samples': len(self.rtt_samples)
+        }
 
     def _deliver_data(self):
         sorted_seqs = sorted(self.receive_buffer.keys())
@@ -377,10 +488,14 @@ class TRUProtocol:
                 data=segment,
                 timestamp=time.time()
             )
-            self.next_seq += len(segment)
-            
-            self.send_buffer[packet.seq_num] = (packet, time.time(), 0)
+
+            sent_time = time.time()
+            self.sent_times[packet.seq_num] = sent_time
+
+            self.send_buffer[packet.seq_num] = (packet, sent_time, 0)
             self._send_raw(packet.serialize(), self.peer_addr)
+            
+            self.next_seq += len(segment)
             
             self.congestion.on_packet_sent()
             
@@ -388,11 +503,16 @@ class TRUProtocol:
                 progress_cb(i+1, total_segments)
                 
         start_time = time.time()
-        while self.send_buffer and time.time() - start_time < 30.0:
+        timeout = self._calculate_timeout() * 3
+        while self.send_buffer and time.time() - start_time < timeout:
             time.sleep(0.1)
-            
-        return len(self.send_buffer) == 0
+        
+        success = len(self.send_buffer) == 0
+        if success:
+            self.sent_times.clear()
 
+        return success
+        
     def recv_data(self, expected_segments: int, progress_cb=None) -> bytes:
         data = b''
         received_segments = 0

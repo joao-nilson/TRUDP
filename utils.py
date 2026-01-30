@@ -3,6 +3,8 @@ import time
 from queue import Queue
 import random
 
+loss_probability = 0.0
+
 class CircularBuffer:
     
     def __init__(self, size:int):
@@ -39,16 +41,17 @@ class CircularBuffer:
         self.end = (self.end - 1) % self.size
         return True
     
-    def set_global_loss_probability(p: float):
-        global loss_probability
-        loss_probability = p
+def set_global_loss_probability(p: float):
+    global loss_probability
+    loss_probability = p
+    print(f"Probabilidade de perda configurada para: {p*100:.1f}%")
     
-    def loss_filter(seq: int) -> bool:
-        global loss_probability
-        try:
-            return random.random() < loss_probability
-        except:
-            return False
+def loss_filter(seq: int) -> bool:
+    global loss_probability
+    try:
+        return random.random() < loss_probability
+    except:
+        return False
             
-    def generate_synthetic_data(size: int) -> bytes:
-        return bytes([i % 256 for i in range(size)])
+def generate_synthetic_data(size: int) -> bytes:
+    return bytes([i % 256 for i in range(size)])
