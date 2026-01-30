@@ -12,6 +12,8 @@ import statistics
 import sys
 
 MSS = 1400
+# Controle de fluxo: máximo de segmentos que o destinatário aceita em buffer
+MAX_RECV_WINDOW = 256
 
 class TRUProtocol:
 
@@ -67,6 +69,7 @@ class TRUProtocol:
         
         # Controle de janela
         self.window_size = 4
+        self.recv_window = MAX_RECV_WINDOW  # janela anunciada pelo destinatário nos ACKs
         self.congestion = CongestionControl()
         
         # Controle de threads
@@ -770,8 +773,9 @@ class TRUProtocol:
         data = b''
         received_segments = 0
         start_time = time.time()
-        
-        while received_segments < expected_segments and time.time() - start_time < 30.0:
+        # Timeout alinhado ao cliente (180s para permitir retransmissões com perda)
+        timeout = 180.0
+        while received_segments < expected_segments and time.time() - start_time < timeout:
             if self.app_queue:
                 segment = self.app_queue.pop(0)
                 data += segment
