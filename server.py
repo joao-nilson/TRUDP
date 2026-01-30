@@ -89,7 +89,10 @@ def main():
         sys.exit(1)
     print('Handshake OK.')
 
-    conn.do_key_exchange_as_server()
+    if not conn.do_key_exchange_as_server():
+        print('Falha no acordo de criptografia.', file=sys.stderr)
+        conn.close()
+        sys.exit(1)
     print('Criptografia acordada (chave enviada ao cliente).')
 
     monitor_thread = None

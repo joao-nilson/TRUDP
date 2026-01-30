@@ -13,10 +13,11 @@ class TRUCrypto:
 
     @staticmethod
     def generate_dh_params() -> Tuple[int, int, int]:
-        p = 23
+        p = 0xFFFFFFFB
         g = 5
-        private_key = random.randint(1, p-2)
-        print(f"[CRYPTO-DEBUG] Gerando params: p={p}, g={g}, private={private_key}")
+        
+        private_key = random.randint(1, p-2)  # Chave privada grande
+        print(f"[CRYPTO-DEBUG] Gerando params: g={g}, p={p}, private_key={private_key}")
         return g, p, private_key
 
     @staticmethod
@@ -32,26 +33,55 @@ class TRUCrypto:
         if salt is None:
             salt = os.urandom(16)
 
-        key_material = str(shared_secret).encode() + salt
-        derived_key = hashlib.sha256(key_material).digest()
-
-        while len(derived_key) < 32:
-            derived_key += hashlib.sha256(derived_key + key_material).digest()
+        # Usar HKDF para derivar chave segura
+        shared_bytes = shared_secret.to_bytes((shared_secret.bit_length() + 7) // 8, 'big')
+        key_material = shared_bytes + salt
         
-        return derived_key[:32], salt
+        # Primeira extração
+        prk = hmac.new(salt, key_material, hashlib.sha256).digest()
+        
+        # Expansão
+        info = b"TRUDP Key Derivation"
+        t = b""
+        okm = b""
+        
+        while len(okm) < 32:  # 256 bits
+            t = hmac.new(prk, t + info + bytes([len(t) + 1]), hashlib.sha256).digest()
+            okm += t
+        
+        return okm[:32], salt
 
     @staticmethod
-    def encrypt_data(data: bytes, key: bytes) -> Tuple[bytes, bytes]:
-        iv = os.urandom(16)
-        keystream = hashlib.sha256(key + iv).digest()
-
-        encrypted = bytes(a ^ b for a, b in zip(data, keystream[:len(data)]))
+    def encrypt_data(data: bytes, key: bytes, iv: bytes = None) -> Tuple[bytes, bytes]:
+        if iv is None:
+            iv = os.urandom(16)
+        
+        # Usar modo CTR simples para stream cipher
+        keystream = TRUCrypto._generate_keystream(key, iv, len(data))
+        
+        encrypted = bytes(a ^ b for a, b in zip(data, keystream))
         return encrypted, iv
 
     @staticmethod
     def decrypt_data(encrypted: bytes, key: bytes, iv: bytes) -> bytes:
-        keystream = hashlib.sha256(key + iv).digest()
-        return bytes(a ^ b for a, b in zip(encrypted, keystream[:len(encrypted)]))
+        # A descriptografia é igual à criptografia em modo XOR
+        keystream = TRUCrypto._generate_keystream(key, iv, len(encrypted))
+        return bytes(a ^ b for a, b in zip(encrypted, keystream))
+
+    @staticmethod
+    def _generate_keystream(key: bytes, iv: bytes, length: int) -> bytes:
+        keystream = b""
+        counter = 0
+        
+        while len(keystream) < length:
+            # Combinar IV e contador
+            block_data = iv + counter.to_bytes(8, 'big')
+            # Gerar bloco de keystream
+            block = hmac.new(key, block_data, hashlib.sha256).digest()
+            keystream += block
+            counter += 1
+        
+        return keystream[:length]
 
     @staticmethod
     def compute_hmac(data: bytes, key: bytes) -> bytes:
