@@ -67,11 +67,14 @@ class TRUProtocol:
             try:
                 data, addr = self.sock.recvfrom(2048)
                 packet = TRUPacket.deserialize(data)
+                if not packet.is_valid():
+                    print(f"Checksum error in packet: {packet.seq_num}. Discarding...")
+                    continue
                 self._process_packet(packet, addr)
             except socket.timeout:
                 continue
             except Exception as e:
-                print(f"Receiver erro: {e}")
+                print(f"Receiver error: {e}")
                 continue
 
     def _process_packet(self, packet: TRUPacket, addr: Tuple[str, int]):
@@ -106,7 +109,7 @@ class TRUProtocol:
             timestamp=time.time()
         )
         self.next_seq += 1
-        self._send_raw(syn_ack_packet.serialize(), addr)
+        self._send_raw(syn_ack_packet, addr)
         
         self.peer_addr = addr
 
@@ -121,7 +124,7 @@ class TRUProtocol:
                 packet_type=PacketType.ACK,
                 timestamp=time.time()
             )
-            self._send_raw(ack_packet.serialize(), self.peer_addr)
+            self._send_raw(ack_packet, self.peer_addr)
             
             self.connected = True
             self.base_seq = packet.ack_num
@@ -150,7 +153,7 @@ class TRUProtocol:
             packet_type=PacketType.ACK,
             timestamp=time.time()
         )
-        self._send_raw(ack_packet.serialize(), addr)
+        self._send_raw(ack_packet, addr)
 
         self._deliver_data()
 
@@ -174,7 +177,7 @@ class TRUProtocol:
             timestamp=time.time()
         )
         self.next_seq += 1
-        self._send_raw(fin_ack_packet.serialize(), self.peer_addr)
+        self._send_raw(fin_ack_packet, self.peer_addr)
         
         self.connected = False
         print(f"Connection closed by peer {self.peer_addr}")
@@ -201,7 +204,7 @@ class TRUProtocol:
             while len(self.send_window) >= self.window_size:
                 time.sleep(0.1)
             self.send_window.append(packet)
-            self._send_raw(packet.serialize(), self.peer_addr)
+            self._send_raw(packet, self.peer_addr)
 
         return True
 
@@ -225,7 +228,7 @@ class TRUProtocol:
                 packet_type=PacketType.FIN,
                 timestamp=time.time()
             )
-            self._send_raw(fin_packet.serialize(), self.peer_addr)
+            self._send_raw(fin_packet, self.peer_addr)
             self.next_seq += 1
 
             try:
@@ -244,8 +247,14 @@ class TRUProtocol:
         self.sock.close()
         self.connected = False
 
-    def _send_raw(self, data: bytes, addr: Tuple[str, int]):
+    def _send_raw(self, packet_or_bytes, addr: Tuple[str, int]):
         try:
+            if isinstance(packet_or_bytes, TRUPacket):
+                packet_or_bytes.checksum = packet_or_bytes.calculate_checksum()
+                data = packet_or_bytes.serialize()
+            else:
+                data = packet_or_bytes
+                
             self.sock.sendto(data, addr)
         except Exception as e:
             print(f"Erro ao enviar dados: {e}")
@@ -260,7 +269,7 @@ class TRUProtocol:
             timestamp=time.time()
         )
         self.next_seq += 1
-        self._send_raw(syn_packet.serialize(), self.peer_addr)
+        self._send_raw(syn_packet, self.peer_addr)
 
         # Espera SYN-ACK; reenvia SYN a cada 1s para tolerar perda ou servidor ainda não pronto
         start_time = time.time()
@@ -280,7 +289,7 @@ class TRUProtocol:
                         packet_type=PacketType.ACK,
                         timestamp=time.time()
                     )
-                    self._send_raw(ack_packet.serialize(), self.peer_addr)
+                    self._send_raw(ack_packet, self.peer_addr)
 
                     self.connected = True
                     self.next_seq = packet.ack_num
@@ -296,7 +305,7 @@ class TRUProtocol:
             # Reenviar SYN a cada ~1s para aumentar chance de sucesso
             now = time.time()
             if now - last_syn >= 1.0:
-                self._send_raw(syn_packet.serialize(), self.peer_addr)
+                self._send_raw(syn_packet, self.peer_addr)
                 last_syn = now
 
         return False
@@ -320,7 +329,7 @@ class TRUProtocol:
                         timestamp=time.time()
                     )
                     self.next_seq += 1
-                    self._send_raw(syn_ack_packet.serialize(), addr)
+                    self._send_raw(syn_ack_packet, addr)
                     
                     self.sock.settimeout(5.0)
                     try:
@@ -375,7 +384,8 @@ class TRUProtocol:
             self.next_seq += len(segment)
             
             self.send_buffer[packet.seq_num] = (packet, time.time(), 0)
-            self._send_raw(packet.serialize(), self.peer_addr)
+            packet.checksum = packet.calculate_checksum()
+            self._send_raw(packet, self.peer_addr)
             
             self.congestion.on_packet_sent()
             
@@ -419,7 +429,7 @@ class TRUProtocol:
                 timestamp=time.time()
             )
             self.next_seq += 1
-            self._send_raw(packet.serialize(), self.peer_addr)
+            self._send_raw(packet, self.peer_addr)
             
             start_time = time.time()
             while time.time() - start_time < 5.0:
@@ -477,7 +487,7 @@ class TRUProtocol:
                             timestamp=time.time()
                         )
                         self.next_seq += 1
-                        self._send_raw(resp_packet.serialize(), addr)
+                        self._send_raw(resp_packet, addr)
                         return
                         
                 except socket.timeout:

@@ -56,5 +56,23 @@ class TRUPacket:
         )
     
     def calculate_checksum(self) -> int:
+        old_checksum = self.checksum
+        self.checksum = 0
+        
         data = self.serialize()
-        return sum(data) & 0xFFFFFFFF
+        
+        if len(data) % 2 == 1:
+            data += b'\x00'
+            
+        s = 0
+        for i in range(0, len(data), 2):
+            w = (data[i] << 8) + (data[i+1])
+            s += w
+            while (s >> 16):
+                s = (s & 0xFFFF) + (s >> 16)
+                
+        self.checksum = old_checksum
+        return ~s & 0xFFFF
+
+    def is_valid(self) -> bool:
+        return self.checksum == self.calculate_checksum()
