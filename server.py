@@ -15,6 +15,8 @@ def main():
                         'Usado para avaliar o controle de congestionamento. Default: 0.0')
     p.add_argument('--output', default='received.bin', metavar='ARQUIVO',
                    help='Arquivo de saída para os dados recebidos. Default: received.bin')
+    p.add_argument('--no-cc', action='store_true', help='Desativar Controle de Congestionamento')
+    p.add_argument('--no-crypto', action='store_true', help='Desativar Criptografia')
     args = p.parse_args()
 
     set_global_loss_probability(args.loss)
@@ -25,7 +27,7 @@ def main():
         # Descartar pacote com probabilidade loss_p (sortear a cada chegada)
         return random.random() < loss_p
 
-    conn = TRUConnection(host=args.host, port=args.port, is_server=True, loss_callback=loss_filter)
+    conn = TRUConnection(host=args.host, port=args.port, is_server=True, loss_callback=loss_filter, congestion_control=not args.no_cc)
     print(f'Servidor ouvindo em {args.host}:{args.port}')
     if loss_p > 0:
         print(f'Perda artificial ativa: {loss_p*100:.1f}% dos pacotes podem ser descartados.')
@@ -36,8 +38,11 @@ def main():
         sys.exit(1)
     print('Handshake OK.')
 
-    conn.do_key_exchange_as_server()
-    print('Criptografia acordada (chave enviada ao cliente).')
+    if not args.no_crypto:
+        conn.do_key_exchange_as_server()
+        print('Criptografia acordada (chave enviada ao cliente).')
+    else:
+        print('Criptografia desativada.')
     conn.start()
 
     def progress(received, total):

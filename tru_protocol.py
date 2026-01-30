@@ -11,7 +11,7 @@ MSS = 1400
 
 class TRUProtocol:
 
-    def __init__(self, host='0.0.0.0', port=5000, is_server=False, loss_callback=None):
+    def __init__(self, host='0.0.0.0', port=5000, is_server=False, loss_callback=None, congestion_control=True):
         self.host = host
         self.port = port
         self.is_server = is_server
@@ -46,8 +46,17 @@ class TRUProtocol:
         self.receive_segments = set()
         
         #window control
-        self.window_size = 4
-        self.congestion = CongestionControl()
+        if congestion_control:
+            self.window_size = 4
+            self.congestion = CongestionControl()
+        else:
+            self.window_size = 999999999
+            self.congestion = type('Dummy', (), {
+                'on_packet_sent': lambda s: None,
+                'on_ack_received': lambda s: None, 
+                'on_timeout': lambda s: None, 
+                'on_three_duplicate_acks': lambda s: None, 
+                'get_window_size': lambda s: 999999999})()
         
         #thread control
         self.receiver_thread = None
@@ -202,7 +211,7 @@ class TRUProtocol:
         
         for packet in packets:
             while len(self.send_window) >= self.window_size:
-                time.sleep(0.1)
+                time.sleep(0.01)
             self.send_window.append(packet)
             self._send_raw(packet, self.peer_addr)
 
@@ -249,6 +258,9 @@ class TRUProtocol:
 
     def _send_raw(self, packet_or_bytes, addr: Tuple[str, int]):
         try:
+            if self.window_size > 100000:
+                time.sleep(0.001)
+
             if isinstance(packet_or_bytes, TRUPacket):
                 packet_or_bytes.checksum = packet_or_bytes.calculate_checksum()
                 data = packet_or_bytes.serialize()

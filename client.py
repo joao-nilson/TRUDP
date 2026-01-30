@@ -9,6 +9,8 @@ def main():
     p.add_argument('--port', type=int, default=5000, help='Porta do servidor')
     p.add_argument('--packets', type=int, default=10000,
                    help='Número de pacotes a enviar (≥10000 para avaliação). Default: 10000')
+    p.add_argument('--no-cc', action='store_true', help='Desativar Controle de Congestionamento')
+    p.add_argument('--no-crypto', action='store_true', help='Desativar Criptografia')
     g = p.add_mutually_exclusive_group()
     g.add_argument('--file', metavar='CAMINHO', help='Arquivo a enviar (tamanho define nº de pacotes)')
     g.add_argument('--synthetic', action='store_true',
@@ -34,20 +36,19 @@ def main():
         # Dados sintéticos (preenchimento do payload)
         payload = bytes((i % 256) for i in range(total_bytes))
 
-    conn = TRUConnection(is_server=False)
+    conn = TRUConnection(is_server=False, congestion_control=not args.no_cc)
     print(f'Conectando a {args.host}:{args.port}...')
     if not conn.connect(args.host, args.port):
         print('Falha no handshake.', file=sys.stderr)
         sys.exit(1)
     print('Handshake OK.')
     conn.start()
-
-    if not conn.do_key_exchange_as_client():
-        print('Falha no acordo de criptografia.', file=sys.stderr)
-        conn.close()
-        sys.exit(1)
-    print('Criptografia acordada.')
-
+    if not args.no_crypto:
+        if not conn.do_key_exchange_as_client():
+            print('Falha no acordo de criptografia.', file=sys.stderr)
+            conn.close()
+            sys.exit(1)
+        print('Criptografia acordada.')
     def progress(sent, total):
         if total > 0 and sent % max(1, total // 20) == 0 or sent == total:
             print(f'  Enviados {sent}/{total} pacotes ({100*sent/total:.1f}%)')
