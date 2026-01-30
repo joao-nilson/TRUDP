@@ -26,34 +26,34 @@ def main():
         return random.random() < loss_p
 
     conn = TRUConnection(host=args.host, port=args.port, is_server=True, loss_callback=loss_filter)
-    print(f'Servidor ouvindo em {args.host}:{args.port}')
+    print(f'Servidor ouvindo em {args.host}:{args.port}', flush=True)
     if loss_p > 0:
-        print(f'Perda artificial ativa: {loss_p*100:.1f}% dos pacotes podem ser descartados.')
+        print(f'Perda artificial ativa: {loss_p*100:.1f}% dos pacotes podem ser descartados.', flush=True)
 
     if not conn.accept():
-        print('Falha no handshake.', file=sys.stderr)
+        print('Falha no handshake.', file=sys.stderr, flush=True)
         conn.close()
         sys.exit(1)
-    print('Handshake OK.')
+    print('Handshake OK.', flush=True)
 
     conn.do_key_exchange_as_server()
-    print('Criptografia acordada (chave enviada ao cliente).')
+    print('Criptografia acordada (chave enviada ao cliente).', flush=True)
     conn.start()
 
     def progress(received, total):
         if total > 0 and (received % max(1, total // 20) == 0 or received == total):
-            print(f'  Recebidos {received}/{total} pacotes ({100*received/total:.1f}%)')
+            print(f'  Recebidos {received}/{total} pacotes ({100*received/total:.1f}%)', flush=True)
 
-    print(f'Aguardando {total_segments} pacotes...')
+    print(f'Aguardando {total_segments} pacotes...', flush=True)
     data = conn.recv_data(total_segments, progress_cb=progress)
     conn.close()
 
     try:
         with open(args.output, 'wb') as f:
             f.write(data)
-        print(f'Dados salvos em {args.output} ({len(data)} bytes).')
+        print(f'Dados salvos em {args.output} ({len(data)} bytes).', flush=True)
     except Exception as e:
-        print(f'Erro ao salvar: {e}', file=sys.stderr)
+        print(f'Erro ao salvar: {e}', file=sys.stderr, flush=True)
         sys.exit(1)
 
 if __name__ == '__main__':

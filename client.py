@@ -35,30 +35,30 @@ def main():
         payload = bytes((i % 256) for i in range(total_bytes))
 
     conn = TRUConnection(is_server=False)
-    print(f'Conectando a {args.host}:{args.port}...')
+    print(f'Conectando a {args.host}:{args.port}...', flush=True)
     if not conn.connect(args.host, args.port):
-        print('Falha no handshake.', file=sys.stderr)
+        print('Falha no handshake.', file=sys.stderr, flush=True)
         sys.exit(1)
-    print('Handshake OK.')
+    print('Handshake OK.', flush=True)
     conn.start()
 
     if not conn.do_key_exchange_as_client():
-        print('Falha no acordo de criptografia.', file=sys.stderr)
+        print('Falha no acordo de criptografia.', file=sys.stderr, flush=True)
         conn.close()
         sys.exit(1)
-    print('Criptografia acordada.')
+    print('Criptografia acordada.', flush=True)
 
     def progress(sent, total):
-        if total > 0 and sent % max(1, total // 20) == 0 or sent == total:
-            print(f'  Enviados {sent}/{total} pacotes ({100*sent/total:.1f}%)')
+        if total > 0 and (sent % max(1, total // 20) == 0 or sent == total):
+            print(f'  Enviados {sent}/{total} pacotes ({100*sent/total:.1f}%)', flush=True)
 
-    print(f'Enviando {total_packets} pacotes ({len(payload)} bytes)...')
+    print(f'Enviando {total_packets} pacotes ({len(payload)} bytes)...', flush=True)
     ok = conn.send_data(payload, progress_cb=progress)
     conn.close()
     if ok:
-        print('Transferência concluída com sucesso.')
+        print('Transferência concluída com sucesso.', flush=True)
     else:
-        print('Transferência incompleta ou timeout.', file=sys.stderr)
+        print('Transferência incompleta ou timeout.', file=sys.stderr, flush=True)
         sys.exit(1)
 
 

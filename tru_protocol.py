@@ -48,7 +48,7 @@ class TRUProtocol:
         self.receive_segments = set()
         
         # window control (congestion) + controle de fluxo (janela do destinatário)
-        self.window_size = 4
+        self.window_size = 64
         self.recv_window = MAX_RECV_WINDOW  # janela anunciada pelo destinatário nos ACKs
         self.congestion = CongestionControl()
         
@@ -58,6 +58,9 @@ class TRUProtocol:
         
         #queue
         self.app_queue = []
+        
+        # controle de fechamento
+        self.fin_received = False
 
     def start(self):
         self.running = True
@@ -169,10 +172,10 @@ class TRUProtocol:
         sorted_seqs = sorted(self.receive_buffer.keys())
 
         for seq in sorted_seqs:
-            if seq == self.ack_num:
-                data = self.receive_buffer.pop(seq)
-                self.app_queue.append(data)
-                self.ack_num += len(data)
+            # Entregar dados mesmo que cheguem fora de ordem
+            data = self.receive_buffer.pop(seq)
+            self.app_queue.append(data)
+            self.ack_num += len(data)
 
     def _handle_fin(self, packet: TRUPacket):
         if not self.connected:
@@ -187,8 +190,8 @@ class TRUProtocol:
         self.next_seq += 1
         self._send_raw(fin_ack_packet.serialize(), self.peer_addr)
         
-        self.connected = False
-        print(f"Connection closed by peer {self.peer_addr}")
+        self.fin_received = True
+        print(f"FIN received from {self.peer_addr}")
 
     def _handle_fin_ack(self):
         if self.connected:
@@ -230,7 +233,8 @@ class TRUProtocol:
         return None
 
     def close(self):
-        if self.connected and self.peer_addr:
+        self.connected = False
+        if self.peer_addr:
             fin_packet = TRUPacket(
                 seq_num=self.next_seq,
                 packet_type=PacketType.FIN,
@@ -401,8 +405,6 @@ class TRUProtocol:
         RTO = 1.0  # retransmitir após 1 s sem ACK
         send_timeout = 180.0  # alinhado ao servidor
         while self.send_buffer and time.time() - start_time < send_timeout:
-            if not self.connected:
-                break  # servidor fechou a conexão
             now = time.time()
             for seq in list(self.send_buffer.keys()):
                 packet, sent_time, retries = self.send_buffer[seq]
@@ -410,6 +412,18 @@ class TRUProtocol:
                     self._send_raw(packet.serialize(), self.peer_addr)
                     self.send_buffer[seq] = (packet, now, retries + 1)
             time.sleep(0.1)
+        
+        # Aguardar mais um pouco para garantir que todos os ACKs foram processados
+        time.sleep(0.5)
+        
+        # Enviar FIN para sinalizar fim da transferência
+        fin_packet = TRUPacket(
+            seq_num=self.next_seq,
+            packet_type=PacketType.FIN,
+            timestamp=time.time()
+        )
+        self.next_seq += 1
+        self._send_raw(fin_packet.serialize(), self.peer_addr)
             
         return len(self.send_buffer) == 0
 
@@ -419,6 +433,7 @@ class TRUProtocol:
         start_time = time.time()
         # Timeout alinhado ao cliente (180s para permitir retransmissões com perda)
         timeout = 180.0
+        
         while received_segments < expected_segments and time.time() - start_time < timeout:
             if self.app_queue:
                 segment = self.app_queue.pop(0)
