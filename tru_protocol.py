@@ -392,6 +392,7 @@ class TRUProtocol:
 
     def connect(self, host: str, port: int) -> bool:
         self.peer_addr = (host, port)
+        print(f"[CONNECT] Conectando a {host}:{port}")
 
         #SYN
         syn_packet = TRUPacket(
@@ -400,18 +401,24 @@ class TRUProtocol:
             timestamp=time.time()
         )
         self.next_seq += 1
+        print(f"[CONNECT] Enviando SYN, seq={syn_packet.seq_num}")
         self._send_raw(syn_packet.serialize(), self.peer_addr)
 
         #espera SYN-ACK
         start_time = time.time()
+        self.sock.settimeout(5.0)
+
         while time.time() - start_time < 5.0:
             try:
-                self.sock.settimeout(1.0)
                 data, addr = self.sock.recvfrom(1024)
                 packet = TRUPacket.deserialize(data)
 
+                print(f"[CONNECT] Pacote recebido: tipo={packet.packet_type}, de={addr}")
+
                 if (packet.packet_type == PacketType.SYN_ACK and
                     packet.ack_num == syn_packet.seq_num + 1):
+
+                    print(f"[CONNECT] SYN-ACK recebido, ack={packet.ack_num}, seq={packet.seq_num}")
 
                     ack_packet = TRUPacket(
                         seq_num=packet.ack_num,
@@ -420,26 +427,39 @@ class TRUProtocol:
                         timestamp=time.time()
                     )
                     self._send_raw(ack_packet.serialize(), self.peer_addr)
+                    print(f"[CONNECT] Enviando ACK, seq={ack_packet.seq_num}, ack={ack_packet.ack_num}")
 
                     self.connected = True
+                    self.base_seq = packet.ack_num
                     self.next_seq = packet.ack_num
+                    print("[CONNECT] Handshake completado com sucesso")
                     return True
+                else:
+                    print(f"[CONNECT] Pacote não é SYN-ACK correto")
 
             except socket.timeout:
+                print("[CONNECT] Timeout esperando SYN-ACK")
                 continue
-
+        
+        print("[CONNECT] Falha no handshake - timeout")
         return True
 
     def accept(self) -> bool:
         if not self.is_server:
             return False
         
+        print("[ACCEPT] Aguardando conexão...")
+        self.sock.settimeout(10.0)
+
         while True:
             try:
                 data, addr = self.sock.recvfrom(1024)
                 packet = TRUPacket.deserialize(data)
+
+                print(f"[ACCEPT] Pacote recebido: tipo={packet.packet_type}, de={addr}")
                 
                 if packet.packet_type == PacketType.SYN:
+                    print(f"[ACCEPT] SYN recebido de {addr}, seq={packet.seq_num}")
                     self.peer_addr = addr
 
                     syn_ack_packet = TRUPacket(
@@ -449,23 +469,35 @@ class TRUProtocol:
                         timestamp=time.time()
                     )
                     self.next_seq += 1
-                    self._send_packet(syn_ack_packet.serialize(), addr)
+                    print(f"[ACCEPT] Enviando SYN-ACK, seq={syn_ack_packet.seq_num}, ack={syn_ack_packet.ack_num}")
+                    self._send_raw(syn_ack_packet.serialize(), addr)
                     
                     self.sock.settimeout(5.0)
                     try:
                         data, _ = self.sock.recvfrom(1024)
                         ack_packet = TRUPacket.deserialize(data)
+
+                        print(f"[ACCEPT] Pacote ACK recebido: seq={ack_packet.seq_num}, ack={ack_packet.ack_num}")
                         
                         if ack_packet.packet_type == PacketType.ACK:
                             self.connected = True
                             self.base_seq = ack_packet.seq_num
+                            self.next_seq = ack_packet.seq_num
+                            print("[ACCEPT] Handshake completado com sucesso")
                             return True
+                        else:
+                            print(f"[ACCEPT] Pacote não é ACK: tipo={ack_packet.packet_type}")
                             
                     except socket.timeout:
+                        print("[ACCEPT] Timeout esperando ACK")
                         continue
+            except socket.timeout:
+                print("[ACCEPT] Timeout aguardando SYN")
+                continue
             except Exception as e:
                 print(f"Accept error: {e}")
                 return False
+        return False
     
     def send_data(self, data: bytes, progress_cb=None) -> bool:
         if not self.connected or not self.peer_addr:
@@ -533,7 +565,9 @@ class TRUProtocol:
 
     def do_key_exchange_as_client(self) -> bool:
         try:
+            print("[KEY-EXCHANGE] Iniciando troca de chaves (cliente)")
             g, p, private = self.crypto.generate_dh_params()
+            print(f"[KEY-EXCHANGE] Parâmetros DH: g={g}, p={p}, private={private}")
             public = self.crypto.compute_dh_public(g, p, private)
             
             dh_data = f"DH:{g}:{p}:{public}".encode()
@@ -544,51 +578,70 @@ class TRUProtocol:
                 timestamp=time.time()
             )
             self.next_seq += 1
+            print(f"[KEY-EXCHANGE] Enviando chave pública: {public}")
             self._send_raw(packet.serialize(), self.peer_addr)
             
             start_time = time.time()
+            self.sock.settimeout(5.0)
+
             while time.time() - start_time < 5.0:
                 try:
-                    self.sock.settimeout(1.0)
                     data, addr = self.sock.recvfrom(1024)
                     packet = TRUPacket.deserialize(data)
                     
-                    if packet.data.startswith(b"DH:"):
+                    if packet.data and packet.data.startswith(b"DH:"):
+                        print(f"[KEY-EXCHANGE] Resposta recebida: {packet.data[:50]}...")
                         parts = packet.data.decode().split(':')
                         server_public = int(parts[1])
                         
                         shared = self.crypto.compute_dh_shared(server_public, private, p)
+                        print(f"[KEY-EXCHANGE] Segredo compartilhado calculado")
                         self.encryption_key, _ = self.crypto.derive_key(shared)
                         self.encryption_enabled = True
+                        print("[KEY-EXCHANGE] Troca de chaves completada com sucesso")
                         return True
+                    else:
+                        print(f"[KEY-EXCHANGE] Pacote não contém dados DH")
                         
                 except socket.timeout:
+                    print("[KEY-EXCHANGE] Timeout esperando resposta do servidor")
                     continue
-                    
+                except Exception as e:
+                    print(f"[KEY-EXCHANGE] Erro processando resposta: {e}")
+
         except Exception as e:
             print(f"Key exchange error: {e}")
-            
+            import traceback
+            traceback.print_exc()
+
+        print("[KEY-EXCHANGE] Falha na troca de chaves")
         return False
         
     def do_key_exchange_as_server(self):
         try:
+            print("[KEY-EXCHANGE] Aguardando troca de chaves do cliente")
             start_time = time.time()
-            while time.time() - start_time < 5.0:
+            self.sock.settimeout(10.0)
+
+            while time.time() - start_time < 10.0:
                 try:
-                    self.sock.settimeout(1.0)
                     data, addr = self.sock.recvfrom(1024)
                     packet = TRUPacket.deserialize(data)
                     
-                    if packet.data.startswith(b"DH:"):
+                    if packet.data and packet.data.startswith(b"DH:"):
+                        print(f"[KEY-EXCHANGE] Dados DH recebidos: {packet.data[:50]}...")
                         parts = packet.data.decode().split(':')
                         g = int(parts[1])
                         p = int(parts[2])
                         client_public = int(parts[3])
+
+                        print(f"[KEY-EXCHANGE] Parâmetros recebidos: g={g}, p={p}, client_public={client_public}")
                         
                         private = self.crypto.generate_dh_params()[2]
                         server_public = self.crypto.compute_dh_public(g, p, private)
                         
                         shared = self.crypto.compute_dh_shared(client_public, private, p)
+                        print(f"[KEY-EXCHANGE] Segredo compartilhado calculado")
                         self.encryption_key, _ = self.crypto.derive_key(shared)
                         self.encryption_enabled = True
                         
@@ -600,11 +653,23 @@ class TRUProtocol:
                             timestamp=time.time()
                         )
                         self.next_seq += 1
+                        print(f"[KEY-EXCHANGE] Enviando chave pública do servidor: {server_public}")
                         self._send_raw(resp_packet.serialize(), addr)
+                        print("[KEY-EXCHANGE] Troca de chaves completada com sucesso")
                         return
+                    else:
+                        print(f"[KEY-EXCHANGE] Pacote não contém dados DH")
+
                         
                 except socket.timeout:
+                    print("[KEY-EXCHANGE] Timeout aguardando dados DH do cliente")
                     continue
+                except Exception as e:
+                    print(f"[KEY-EXCHANGE] Erro processando dados: {e}")
+                    import traceback
+                    traceback.print_exc()
                     
         except Exception as e:
             print(f"Key exchange error: {e}")
+            import traceback
+            traceback.print_exc()

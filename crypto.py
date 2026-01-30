@@ -1,6 +1,7 @@
 import os
 import hashlib
 import hmac
+import random
 from typing import Tuple, Optional
 
 class TRUCrypto:
@@ -9,7 +10,7 @@ class TRUCrypto:
         self.session_key = None
         self.iv = None
 
-    @statismethod
+    @staticmethod
     def generate_dh_params() -> Tuple[int, int, int]:
         p = 23
         g = 5
