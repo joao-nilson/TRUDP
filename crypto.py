@@ -16,6 +16,7 @@ class TRUCrypto:
         p = 23
         g = 5
         private_key = random.randint(1, p-2)
+        print(f"[CRYPTO-DEBUG] Gerando params: p={p}, g={g}, private={private_key}")
         return g, p, private_key
 
     @staticmethod
@@ -55,3 +56,24 @@ class TRUCrypto:
     @staticmethod
     def compute_hmac(data: bytes, key: bytes) -> bytes:
         return hmac.new(key, data, hashlib.sha256).digest()[:16]
+
+    def test_encryption(self, key: bytes) -> bool:
+        test_data = b"Teste de criptografia TRUDP"
+        
+        # Criptografar
+        encrypted, iv = self.encrypt_data(test_data, key)
+        
+        # Descriptografar
+        decrypted = self.decrypt_data(encrypted, key, iv)
+        
+        # Verificar integridade
+        success = test_data == decrypted
+        
+        if success:
+            print(f"[CRYPTO-TEST] Sucesso! Dados: {test_data[:20]}...")
+            print(f"[CRYPTO-TEST] Criptografado: {encrypted.hex()[:20]}...")
+            print(f"[CRYPTO-TEST] IV: {iv.hex()[:20]}...")
+        else:
+            print(f"[CRYPTO-TEST] Falha! Original: {test_data}, Decriptado: {decrypted}")
+        
+        return success

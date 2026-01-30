@@ -89,9 +89,8 @@ def main():
         sys.exit(1)
     print('Handshake OK.')
 
-    # conn.do_key_exchange_as_server()
-    # print('Criptografia acordada (chave enviada ao cliente).')
-    print('Criptografia desabilitada para testes.')
+    conn.do_key_exchange_as_server()
+    print('Criptografia acordada (chave enviada ao cliente).')
 
     monitor_thread = None
     if args.monitor:
