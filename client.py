@@ -45,6 +45,78 @@ def monitor_rtt(conn, interval=5.0):
     finally:
         print("[Monitor] Monitoramento de RTT finalizado")
 
+
+
+def save_final_graphs(protocol, filename="graficos_trudp.png"):
+    try:
+        import matplotlib.pyplot as plt
+        import numpy as np
+        
+        collector = protocol.metrics_collector
+        if not collector.throughput_samples and not collector.packet_metrics:
+            return
+
+        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+        fig.suptitle(f'Resultados TRUDP - Peer: {protocol.peer_addr}', fontsize=14)
+
+        # Throughput
+        if collector.throughput_samples:
+            times = np.array([s.timestamp for s in collector.throughput_samples])
+            times = times - times[0]
+            thr = np.array([s.estimated_throughput * 8 / 1e6 for s in collector.throughput_samples])
+            axes[0, 0].plot(times, thr, 'b-', label='Throughput')
+            axes[0, 0].fill_between(times, thr, color='b', alpha=0.1)
+        axes[0, 0].set_title('Throughput (Mbps)')
+        axes[0, 0].set_xlabel('Tempo (s)')
+        axes[0, 0].set_ylabel('Mbps')
+        axes[0, 0].grid(True, linestyle='--', alpha=0.6)
+
+        # CWND
+        if collector.packet_metrics:
+            times = np.array([m.timestamp for m in collector.packet_metrics])
+            times = times - times[0]
+            cwnd = np.array([m.congestion_window for m in collector.packet_metrics])
+            axes[0, 1].plot(times, cwnd, 'g-', label='CWND')
+        axes[0, 1].set_title('Janela de Congestionamento')
+        axes[0, 1].set_xlabel('Tempo (s)')
+        axes[0, 1].set_ylabel('Pacotes')
+        axes[0, 1].grid(True, linestyle='--', alpha=0.6)
+
+        # RTT (Microsegundos)
+        rtt_metrics = [m for m in collector.packet_metrics if m.rtt is not None]
+        if rtt_metrics:
+            times = np.array([m.timestamp for m in rtt_metrics])
+            times = times - times[0]
+            rtts = np.array([m.rtt * 1000000 for m in rtt_metrics])
+            axes[1, 0].plot(times, rtts, 'r.', markersize=2, alpha=0.5)
+            if len(rtts) > 20:
+                window = 20
+                avg = np.convolve(rtts, np.ones(window)/window, mode='valid')
+                axes[1, 0].plot(times[window-1:], avg, 'k-', linewidth=1)
+        axes[1, 0].set_title('RTT (μs)')
+        axes[1, 0].set_xlabel('Tempo (s)')
+        axes[1, 0].set_ylabel('μs')
+        axes[1, 0].grid(True, linestyle='--', alpha=0.6)
+
+        # Pacotes em Voo
+        if collector.throughput_samples:
+            times = np.array([s.timestamp for s in collector.throughput_samples])
+            times = times - times[0]
+            flight = np.array([s.packets_in_flight for s in collector.throughput_samples])
+            axes[1, 1].plot(times, flight, color='purple', label='Em Voo')
+        axes[1, 1].set_title('Pacotes em Voo')
+        axes[1, 1].set_xlabel('Tempo (s)')
+        axes[1, 1].set_ylabel('Pacotes')
+        axes[1, 1].grid(True, linestyle='--', alpha=0.6)
+
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+        plt.savefig(filename, dpi=300)
+        plt.close()
+        print(f"[GRAPH] Salvo em: {filename}")
+    except Exception as e:
+        print(f"[GRAPH] Erro ao salvar PNG: {e}")
+
+
 def main():
     p = argparse.ArgumentParser(description='Cliente TRUDP - envia dados ao servidor')
     p.add_argument('--host', default='127.0.0.1', help='Endereço do servidor')
@@ -163,6 +235,10 @@ def main():
             conn.monitoring_active = False
         if monitor_thread and monitor_thread.is_alive():
             monitor_thread.join(timeout=2.0)
+
+        loss_str = f"_loss{args.loss}" if args.loss > 0 else ""
+        cong_str = "_nocong" if args.no_congestion else ""
+        save_final_graphs(conn, f"graficos_trudp{loss_str}{cong_str}.png")
 
         conn.close()
 
