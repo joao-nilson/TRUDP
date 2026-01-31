@@ -11,10 +11,17 @@ Um protocolo de transporte confiável implementado sobre UDP.
 `# Executar todos os experimentos automaticamente
 python run_experiments.py
 
-# Ou executar experimentos individuais
-python client.py --packets 1000 --loss 0.0 --monitor
-python server.py --packets 1000 --loss 0.0 --monitor
+# Grafico com congestionamento e sem perda
+`python3 client.py --packets 10000 --monitor
+python3 server.py --packets 10000 --monitor`
+
+# Grafico sem congestionamento e sem perda
+`
+python3 client.py --packets 10000 --no-congestion --monitor
+`
 
 # Com perdas e sem controle de congestionamento
+`
 python client.py --packets 1000 --loss 0.05 --no-congestion --monitor
 python server.py --packets 1000 --loss 0.05 --no-congestion --monitor`
+`
