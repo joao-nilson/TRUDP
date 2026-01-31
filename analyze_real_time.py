@@ -40,7 +40,7 @@ class RealTimeAnalyzer:
         
         # Gráfico 3: RTT
         self.ax3 = self.axes[1, 0]
-        self.ax3.set_title('RTT (ms)')
+        self.ax3.set_title('RTT (μs)')
         self.ax3.set_xlabel('Tempo (s)')
         self.ax3.set_ylabel('RTT')
         self.ax3.grid(True, alpha=0.3)
@@ -60,19 +60,21 @@ class RealTimeAnalyzer:
         # Coletar métricas do protocolo
         stats = self.protocol.get_rtt_stats()
         congestion_stats = self.protocol.get_congestion_stats()
+
+        collector = self.protocol.metrics_collector
         
         self.times.append(current_time)
         
         # Estimar throughput (simplificado)
-        if len(self.times) > 1:
-            time_diff = self.times[-1] - self.times[-2]
-            if time_diff > 0:
-                throughput = len(self.protocol.send_buffer) * 1400 * 8 / time_diff / 1e6  # Mbps
-                self.throughputs.append(throughput)
+        if collector.throughput_samples:
+            last_sample = collector.throughput_samples[-1].estimated_throughput
+            self.throughputs.append(last_sample * 8 / 1e6)
+        else:
+            self.throughputs.append(0)
         
         # Coletar outras métricas
         self.cwnds.append(congestion_stats.get('cwnd', 0))
-        self.rtts.append(stats.get('avg', 0) * 1000)  # converter para ms
+        self.rtts.append(stats.get('avg', 0) * 1000000)  # converter para ms
         
         # Pacotes em voo
         in_flight = len(self.protocol.send_buffer)
@@ -115,15 +117,12 @@ class RealTimeAnalyzer:
         plt.tight_layout()
         plt.show()
 
-if __name__ == "__main__":
-    protocol = TRUProtocol(is_server=False)
+def start_analyzer_in_thread(protocol_instance):
+    #função utilitária para disparar os gráficos sem travar o cliente
+    def run():
+        analyzer = RealTimeAnalyzer(protocol_instance)
+        analyzer.start()
     
-    analyzer = RealTimeAnalyzer(protocol)
-    
-    threading.Thread(target=analyzer.start, daemon=True).start()
-    
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        print("Análise encerrada")
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread

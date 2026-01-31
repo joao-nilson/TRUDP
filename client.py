@@ -108,6 +108,11 @@ def main():
 
     monitor_thread = None
     if args.monitor:
+        try:
+            from analyze_real_time import start_analyzer_in_thread
+            start_analyzer_in_thread(conn)
+        except ImportError:
+            print("[Erro] Não foi possível carregar analyze_real_time.py")
         conn.monitoring_active = True
         monitor_thread = threading.Thread(
             target=monitor_rtt, 
