@@ -57,6 +57,8 @@ def main():
                    help='Ativar monitoramento de RTT durante a transferência')
     p.add_argument('--monitor-interval', type=float, default=5.0,
                    help='Intervalo em segundos para monitoramento de RTT. Default: 5.0')
+    p.add_argument('--no-congestion', action='store_true',
+               help='Desativar controle de congestionamento')
     g = p.add_mutually_exclusive_group()
     g.add_argument('--file', metavar='CAMINHO', help='Arquivo a enviar (tamanho define nº de pacotes)')
     g.add_argument('--synthetic', action='store_true',
@@ -88,7 +90,8 @@ def main():
         payload = bytes((i % 256) for i in range(total_bytes))
         print(f"Gerando {total_packets} pacotes ({total_bytes} bytes)")
 
-    conn = TRUProtocol(is_server=False)
+    conn = TRUProtocol(is_server=False, 
+                   enable_congestion_control=not args.no_congestion)
     conn.start()
 
     print(f'Conectando a {args.host}:{args.port}...')
@@ -121,8 +124,15 @@ def main():
     print(f'Enviando {total_packets} pacotes ({len(payload)} bytes)...')
 
     try:
+        # Adicionar um pequeno delay para garantir que tudo está inicializado
+        time.sleep(0.1)
+        
         ok = conn.send_data(payload, progress_cb=progress)
-
+        
+        if ok:
+            # Esperar um pouco para garantir que todos os ACKs cheguem
+            time.sleep(1.0)
+        
         if hasattr(conn, 'get_rtt_stats'):
             final_stats = conn.get_rtt_stats()
             print("\n" + "="*80)
@@ -134,8 +144,14 @@ def main():
             print(f"Timeout final: {final_stats['timeout']:.3f}s")
             print(f"Amostras coletadas: {final_stats['samples']}")
             print("="*80)
+            
     except KeyboardInterrupt:
         print("\nTransferência interrompida pelo usuário")
+        ok = False
+    except Exception as e:
+        print(f"\nErro durante a transferência: {e}")
+        import traceback
+        traceback.print_exc()
         ok = False
     finally:
         if hasattr(conn, 'monitoring_active'):

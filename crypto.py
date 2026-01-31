@@ -56,10 +56,14 @@ class TRUCrypto:
         if iv is None:
             iv = os.urandom(16)
         
+        print(f"[ENCRYPT_DATA] Criptografando {len(data)} bytes com chave de {len(key)} bytes, IV: {iv.hex()[:8]}...")
+        
         # Usar modo CTR simples para stream cipher
         keystream = TRUCrypto._generate_keystream(key, iv, len(data))
         
         encrypted = bytes(a ^ b for a, b in zip(data, keystream))
+        
+        print(f"[ENCRYPT_DATA] Criptografia concluída: {len(encrypted)} bytes")
         return encrypted, iv
 
     @staticmethod
