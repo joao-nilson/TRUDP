@@ -10,6 +10,7 @@ from crypto import TRUCrypto
 import random
 import statistics
 import sys
+from metrics_collector import MetricsCollector
 
 MSS = 1400
 # Controle de fluxo: máximo de segmentos que o destinatário aceita em buffer
@@ -17,7 +18,8 @@ MAX_RECV_WINDOW = 256
 
 class TRUProtocol:
 
-    def __init__(self, host='0.0.0.0', port=5000, is_server=False, loss_callback=None):
+    def __init__(self, host='0.0.0.0', port=5000, is_server=False, loss_callback=None, 
+                 metrics_collector=None, enable_congestion_control=True):
         self.host = host
         self.port = port
         self.is_server = is_server
@@ -70,11 +72,20 @@ class TRUProtocol:
         # Controle de janela
         self.window_size = 4
         self.recv_window = MAX_RECV_WINDOW  # janela anunciada pelo destinatário nos ACKs
-        self.congestion = CongestionControl()
+        
+        # Controle de congestionamento
+        self.enable_congestion_control = enable_congestion_control
+        if enable_congestion_control:
+            self.congestion = CongestionControl()
+        else:
+            # Modo sem controle de congestionamento: janela fixa
+            self.congestion = None
+            self.window_size = 64  # Janela fixa grande
         
         # Controle de threads
         self.receiver_thread = None
         self.timer_thread = None
+        self.metrics_thread = None
         self.running = False
         
         # Fila para aplicação
@@ -94,6 +105,11 @@ class TRUProtocol:
         self.dh_generator = None
         self.peer_public_key = None
 
+        # Métricas
+        self.metrics_collector = metrics_collector or MetricsCollector()
+        self.metrics_active = False
+        self.experiment_name = "default_experiment"
+
     def start(self):
         if self.running:
             return
@@ -112,6 +128,33 @@ class TRUProtocol:
         
         print(f"[START] Threads iniciadas (is_server={self.is_server})")
 
+    def start_metrics_collection(self):
+        """Iniciar coleta periódica de métricas"""
+        if not self.metrics_active:
+            self.metrics_active = True
+            self.metrics_thread = threading.Thread(target=self._metrics_loop, daemon=True)
+            self.metrics_thread.start()
+            print("[METRICS] Coleta de métricas iniciada")
+
+    def stop_metrics_collection(self):
+        """Parar coleta de métricas"""
+        self.metrics_active = False
+        if self.metrics_thread:
+            self.metrics_thread.join(timeout=1.0)
+        print("[METRICS] Coleta de métricas parada")
+
+    def _metrics_loop(self):
+        """Loop para coleta periódica de métricas"""
+        while self.metrics_active and self.running:
+            try:
+                # Amostrar throughput
+                packets_in_flight = len(self.send_buffer)
+                self.metrics_collector.sample_throughput(packets_in_flight)
+                time.sleep(0.1)  # Amostrar a cada 100ms
+            except Exception as e:
+                print(f"[METRICS] Erro no loop de métricas: {e}")
+                break
+
     def _timer_loop(self):
         while self.running:
             current_time = time.time()
@@ -124,14 +167,15 @@ class TRUProtocol:
                         retransmit.append(seq)
                     else:
                         del self.send_buffer[seq]
-                        print(f"Packet {seq} dropped after {retries} retries")
+                        print(f"[TIMER] Packet {seq} dropped after {retries} retries")
 
             for seq in retransmit:
                 packet, sent_time, retries = self.send_buffer[seq]
-                print(f"Retransmitting packet {seq} (retry {retries + 1}, RTO={timeout:.3f}s)")
+                print(f"[TIMER] Retransmitting packet {seq} (retry {retries + 1}, RTO={timeout:.3f}s)")
                 self._send_raw(packet.serialize(), self.peer_addr)
                 self.send_buffer[seq] = (packet, current_time, retries + 1)
-                self.congestion.on_timeout()
+                if self.enable_congestion_control and self.congestion:
+                    self.congestion.on_timeout()
 
             time.sleep(0.1)
 
@@ -292,6 +336,10 @@ class TRUProtocol:
                     rtt_sample = current_time - self.sent_times[seq]
                     print(f"[HANDLE_ACK] RTT para seq={seq}: {rtt_sample:.6f}s")
                     
+                    # Coletar métricas de RTT
+                    if self.metrics_collector:
+                        self.metrics_collector.record_ack_received(seq, rtt_sample)
+                    
                     if self.min_rtt <= rtt_sample <= self.max_rtt:
                         self._update_rtt(rtt_sample)
                     elif self.rtt_avg == 0 and rtt_sample > 0:
@@ -305,8 +353,9 @@ class TRUProtocol:
         
         if acked_seqs:
             print(f"[HANDLE_ACK] ACKs confirmados: {acked_seqs}")
-            self.congestion.on_ack_received()
-            self.window_size = self.congestion.get_window_size()
+            if self.enable_congestion_control and self.congestion:
+                self.congestion.on_ack_received()
+                self.window_size = self.congestion.get_window_size()
             self.timeout_interval = self._calculate_timeout()
         else:
             print(f"[HANDLE_ACK] Nenhum pacote confirmado por este ACK")
@@ -380,34 +429,44 @@ class TRUProtocol:
         print(f"[KEY_EXCHANGE] Recebido pedido de troca de chaves do cliente")
         
         try:
+            # Verificar tamanho mínimo: g(8) + p(8) + client_public(8) = 24 bytes
             if len(packet.data) < 24:
-                print(f"[KEY_EXCHANGE] Dados insuficientes para troca de chaves")
+                print(f"[KEY_EXCHANGE] Dados insuficientes: {len(packet.data)} bytes")
                 return
                 
+            # Desempacotar usando 'Q' (8 bytes cada)
             g, p, client_public = struct.unpack('!QQQ', packet.data[:24])
             print(f"[KEY_EXCHANGE] Parâmetros recebidos: g={g}, p={p}, client_public={client_public}")
             
+            # Gerar chave privada do servidor
             server_private = random.randint(1, p-2)
             
+            # Calcular chave pública do servidor
             server_public = self.crypto.compute_dh_public(g, p, server_private)
             
+            # Calcular segredo compartilhado
             shared_secret = self.crypto.compute_dh_shared(client_public, server_private, p)
             
+            # Derivar chave de criptografia
             encryption_key, salt = self.crypto.derive_key(shared_secret)
             self.encryption_key = encryption_key
             self.encryption_enabled = True
             
+            # Gerar IV
             self.iv = os.urandom(16)
             
             print(f"[KEY_EXCHANGE] Chave derivada com sucesso (tamanho: {len(encryption_key)} bytes)")
             print(f"[KEY_EXCHANGE] IV gerado: {self.iv.hex()[:16]}...")
             
+            # Testar criptografia
             if not self.crypto.test_encryption(encryption_key):
                 print(f"[KEY_EXCHANGE] Teste de criptografia falhou")
                 return
             
+            # Preparar resposta: server_public (8 bytes) + iv_length (2 bytes) + iv
             response_data = struct.pack('!Q', server_public) + struct.pack('!H', len(self.iv)) + self.iv
             
+            # Enviar resposta
             key_response = TRUPacket(
                 seq_num=self.next_seq,
                 ack_num=packet.seq_num + 1,
@@ -421,7 +480,7 @@ class TRUProtocol:
             key_response.checksum = key_response.calculate_checksum()
             self.next_seq += 1
             
-            print(f"[KEY_EXCHANGE] Enviando resposta de troca de chaves")
+            print(f"[KEY_EXCHANGE] Enviando resposta de troca de chaves ({len(response_data)} bytes)")
             self._send_raw(key_response, addr)
 
             print(f"[KEY_EXCHANGE] Troca de chaves completada no servidor")
@@ -436,20 +495,27 @@ class TRUProtocol:
         print(f"[KEY_RESPONSE] Recebida resposta de troca de chaves do servidor")
         
         try:
-            if len(packet.data) < 8:  # 2 inteiros de 4 bytes cada
-                print(f"[KEY_RESPONSE] Dados insuficientes")
+            # Verificar tamanho mínimo: server_public (8 bytes) + iv_length (2 bytes)
+            if len(packet.data) < 10:
+                print(f"[KEY_RESPONSE] Dados insuficientes: {len(packet.data)} bytes")
                 return
                 
-            server_public, iv_length = struct.unpack('!II', packet.data[:8])
+            # Extrair server_public (8 bytes) e iv_length (2 bytes)
+            server_public = struct.unpack('!Q', packet.data[:8])[0]
+            iv_length = struct.unpack('!H', packet.data[8:10])[0]
             
-            # Extrair IV
-            if len(packet.data) >= 8 + iv_length:
-                self.iv = packet.data[8:8+iv_length]
-            else:
-                print(f"[KEY_RESPONSE] IV incompleto ou ausente")
+            # Verificar se temos o IV completo
+            if len(packet.data) < 10 + iv_length:
+                print(f"[KEY_RESPONSE] IV incompleto: esperado {iv_length} bytes, recebido {len(packet.data) - 10}")
                 return
             
-            # Calcular segredo compartilhado usando a chave pública do servidor
+            # Extrair IV
+            self.iv = packet.data[10:10 + iv_length]
+            
+            print(f"[KEY_RESPONSE] server_public={server_public}, iv_length={iv_length}")
+            print(f"[KEY_RESPONSE] IV recebido ({len(self.iv)} bytes): {self.iv.hex()[:16]}...")
+            
+            # Calcular segredo compartilhado
             if not all([self.dh_private_key, self.dh_prime, self.dh_generator]):
                 print(f"[KEY_RESPONSE] Parâmetros DH não inicializados")
                 return
@@ -462,7 +528,6 @@ class TRUProtocol:
             self.encryption_enabled = True
             
             print(f"[KEY_RESPONSE] Chave derivada com sucesso (tamanho: {len(encryption_key)} bytes)")
-            print(f"[KEY_RESPONSE] IV recebido: {self.iv.hex()[:16]}...")
             
             # Testar criptografia
             if self.crypto.test_encryption(encryption_key):
@@ -473,6 +538,8 @@ class TRUProtocol:
                 
         except Exception as e:
             print(f"[KEY_RESPONSE] Erro ao processar resposta: {e}")
+            import traceback
+            traceback.print_exc()
 
     def _handle_fin(self, packet: TRUPacket):
         print(f"[HANDLE_FIN] Recebido FIN, seq={packet.seq_num}")
@@ -541,7 +608,11 @@ class TRUProtocol:
         print(f"[UPDATE_RTT] Média: {self.rtt_avg:.6f}s, Desvio: {self.rtt_dev:.6f}s")
 
     def _calculate_timeout(self) -> float:
-        timeout = self.rtt_avg + 4 * max(self.rtt_dev, 0.01)
+        if self.rtt_avg > 0:
+            timeout = self.rtt_avg + 4 * max(self.rtt_dev, 0.01)
+        else:
+            timeout = 1.0  # Timeout padrão inicial
+        
         timeout = max(timeout, 0.1)   # Mínimo 100ms
         timeout = min(timeout, 10.0)  # Máximo 10s
         return timeout
@@ -614,21 +685,12 @@ class TRUProtocol:
             return False
 
     def send_data(self, data: bytes, progress_cb=None) -> bool:
-        if not self.connected or not self.peer_addr:
-            print("[SEND_DATA] Não conectado")
-            return False
-        
         print(f"[SEND_DATA] Iniciando envio de {len(data)} bytes, criptografia: {self.encryption_enabled}")
         
-        # Se criptografia estiver habilitada, criptografar os dados
-        if self.encryption_enabled and self.encryption_key is not None and self.iv:
-            try:
-                encrypted_data, iv = self.crypto.encrypt_data(data, self.encryption_key)
-                data = encrypted_data
-                print(f"[SEND_DATA] Dados criptografados: {len(encrypted_data)} bytes, IV: {iv.hex()[:16]}...")
-            except Exception as e:
-                print(f"[SEND_DATA] Erro ao criptografar: {e}")
-                return False
+        if not self.connected or not self.peer_addr:
+            print(f"[SEND_DATA] ERRO: Não conectado ou peer_addr não definido")
+            print(f"[SEND_DATA] connected={self.connected}, peer_addr={self.peer_addr}")
+            return False
         
         segment_size = MSS
         segments = []
@@ -640,7 +702,12 @@ class TRUProtocol:
         
         total_segments = len(segments)
         print(f"[SEND_DATA] Enviando {total_segments} segmentos, total {len(data)} bytes")
-        print(f"[SEND_DATA] Janela atual: {self.window_size}, cwnd: {self.congestion.cwnd}")
+        print(f"[SEND_DATA] Janela atual: {self.window_size}")
+        if self.enable_congestion_control and self.congestion:
+            print(f"[SEND_DATA] cwnd: {self.congestion.cwnd}, ssthresh: {self.congestion.ssthresh}")
+        
+        # Iniciar coleta de métricas
+        self.start_metrics_collection()
         
         # Enviar cada segmento
         for i, segment in enumerate(segments):
@@ -649,16 +716,38 @@ class TRUProtocol:
                 print(f"[SEND_DATA] Janela cheia ({len(self.send_buffer)}/{self.window_size}), esperando...")
                 time.sleep(0.01)
             
-            # Criar pacote com IV (para cada pacote ou usar um IV fixo)
-            packet_iv = self.iv if self.encryption_enabled else b''
+            # Se criptografia estiver habilitada, criptografar o segmento individualmente
+            data_to_send = segment
+            packet_iv = b''
             
+            if self.encryption_enabled and self.encryption_key is not None:
+                try:
+                    print(f"[SEND_DATA] Criptografando segmento {i+1}/{total_segments} ({len(segment)} bytes)")
+                    start_time = time.time()
+                    
+                    # Usar o mesmo IV para todos os pacotes (simplificação)
+                    # Em produção, deveria ser um IV único por pacote
+                    encrypted_data, iv = self.crypto.encrypt_data(segment, self.encryption_key, self.iv)
+                    data_to_send = encrypted_data
+                    packet_iv = self.iv
+                    
+                    end_time = time.time()
+                    print(f"[SEND_DATA] Segmento {i+1} criptografado em {end_time-start_time:.3f}s")
+                except Exception as e:
+                    print(f"[SEND_DATA] Erro ao criptografar segmento {i+1}: {e}")
+                    return False
+            
+            # Verificar se é retransmissão
+            is_retransmission = self.next_seq in self.send_buffer
+            
+            # Criar pacote
             packet = TRUPacket(
                 seq_num=self.next_seq,
                 ack_num=0,
                 packet_type=PacketType.DATA,
                 window=self.window_size,
                 checksum=0,
-                data=segment,
+                data=data_to_send,
                 timestamp=time.time(),
                 iv=packet_iv
             )
@@ -669,11 +758,26 @@ class TRUProtocol:
             self.sent_times[packet.seq_num] = sent_time
             self.send_buffer[packet.seq_num] = (packet, sent_time, 0)
             
-            print(f"[SEND_DATA] Enviando pacote seq={self.next_seq}, tamanho={len(segment)} bytes")
-            self._send_raw(packet, self.peer_addr)
-            self.next_seq += len(segment)
+            # Coletar métricas do pacote
+            cwnd = self.congestion.cwnd if self.enable_congestion_control and self.congestion else self.window_size
+            ssthresh = self.congestion.ssthresh if self.enable_congestion_control and self.congestion else 0
+            state = self.congestion.state if self.enable_congestion_control and self.congestion else "NO_CONGESTION_CTRL"
             
-            self.congestion.on_packet_sent()
+            self.metrics_collector.record_packet_sent(
+                seq_num=packet.seq_num,
+                size=len(data_to_send),
+                is_retransmission=is_retransmission,
+                congestion_window=cwnd,
+                ssthresh=ssthresh,
+                congestion_state=state
+            )
+            
+            print(f"[SEND_DATA] Enviando pacote seq={self.next_seq}, tamanho={len(data_to_send)} bytes")
+            self._send_raw(packet, self.peer_addr)
+            self.next_seq += len(data_to_send)
+            
+            if self.enable_congestion_control and self.congestion:
+                self.congestion.on_packet_sent()
             
             if progress_cb:
                 progress_cb(i + 1, total_segments)
@@ -687,10 +791,15 @@ class TRUProtocol:
         while self.send_buffer and time.time() - start_time < timeout:
             pending = len(self.send_buffer)
             if pending > 0 and time.time() - start_time > 1.0:
-                print(f"[SEND_DATA] Aguardando {pending} pacotes...")
+                print(f"[SEND_DATA] Aguardando {pending} pacotes... (janela: {self.window_size})")
+                if self.enable_congestion_control and self.congestion:
+                    print(f"[SEND_DATA] Estado congestão: {self.congestion.state}, cwnd: {self.congestion.cwnd:.2f}")
             time.sleep(0.1)
         
         success = len(self.send_buffer) == 0
+        
+        # Parar coleta de métricas
+        self.stop_metrics_collection()
         
         if success:
             self.sent_times.clear()
@@ -717,8 +826,11 @@ class TRUProtocol:
             # Calcular chave pública
             public_key = self.crypto.compute_dh_public(g, p, private_key)
             
-            # Preparar dados para envio - usar 'Q' para unsigned long long (8 bytes)
+            # Preparar dados para envio - usar 'Q' para unsigned long long (8 bytes cada)
             key_data = struct.pack('!QQQ', g, p, public_key)
+            
+            print(f"[KEY_EXCHANGE] Enviando parâmetros DH: g={g}, p={p}, public_key={public_key}")
+            print(f"[KEY_EXCHANGE] Dados serializados: {len(key_data)} bytes")
             
             # Enviar pacote de troca de chaves
             key_packet = TRUPacket(
@@ -734,8 +846,6 @@ class TRUProtocol:
             key_packet.checksum = key_packet.calculate_checksum()
             self.next_seq += 1
             
-            print(f"[KEY_EXCHANGE] Enviando parâmetros DH: g={g}, p={p}, public_key={public_key}")
-            print(f"[KEY_EXCHANGE] Dados serializados: {len(key_data)} bytes")
             self._send_raw(key_packet, self.peer_addr)
             
             # Aguardar resposta do servidor
@@ -791,6 +901,9 @@ class TRUProtocol:
 
     def close(self):
         print("[CLOSE] Fechando conexão...")
+        
+        # Parar coleta de métricas
+        self.stop_metrics_collection()
         
         if self.connected and self.peer_addr:
             # Enviar FIN
@@ -856,7 +969,7 @@ class TRUProtocol:
         }
 
     def get_congestion_stats(self):
-        if hasattr(self, 'congestion'):
+        if self.enable_congestion_control and self.congestion:
             return {
                 'cwnd': self.congestion.cwnd,
                 'ssthresh': self.congestion.ssthresh,
@@ -866,99 +979,27 @@ class TRUProtocol:
                 'rtt_avg': getattr(self.congestion, 'rtt_avg', 0),
                 'timeout': getattr(self.congestion, 'timeout_interval', 0)
             }
-        return {}
+        return {
+            'cwnd': self.window_size,
+            'ssthresh': 0,
+            'state': 'NO_CONGESTION_CTRL',
+            'window': self.window_size,
+            'dup_acks': 0,
+            'rtt_avg': 0,
+            'timeout': 0
+        }
 
-    def _handle_key_exchange(self, packet: TRUPacket, addr: Tuple[str, int]):
-        print(f"[KEY_EXCHANGE] Recebido pedido de troca de chaves do cliente")
-        
-        try:
-            if len(packet.data) < 24: 
-                print(f"[KEY_EXCHANGE] Dados insuficientes para troca de chaves")
-                return
-                
-            g, p, client_public = struct.unpack('!QQQ', packet.data[:24])
-            print(f"[KEY_EXCHANGE] Parâmetros recebidos: g={g}, p={p}, client_public={client_public}")
-            
-            server_private = random.randint(1, p-2)
-            
-            server_public = self.crypto.compute_dh_public(g, p, server_private)
-            
-            shared_secret = self.crypto.compute_dh_shared(client_public, server_private, p)
-            
-            encryption_key, salt = self.crypto.derive_key(shared_secret)
-            self.encryption_key = encryption_key
-            self.encryption_enabled = True
-            
-            self.iv = os.urandom(16)
-            
-            print(f"[KEY_EXCHANGE] Chave derivada com sucesso (tamanho: {len(encryption_key)} bytes)")
-            print(f"[KEY_EXCHANGE] IV gerado: {self.iv.hex()[:16]}...")
-            
-            if not self.crypto.test_encryption(encryption_key):
-                print(f"[KEY_EXCHANGE] Teste de criptografia falhou")
-                return
-            
-            response_data = struct.pack('!Q', server_public) + struct.pack('!H', len(self.iv)) + self.iv
-            
-            key_response = TRUPacket(
-                seq_num=self.next_seq,
-                ack_num=packet.seq_num + 1,
-                packet_type=PacketType.KEY_RESPONSE,
-                window=self.window_size,
-                checksum=0,
-                timestamp=time.time(),
-                iv=b'',
-                data=response_data
-            )
-            key_response.checksum = key_response.calculate_checksum()
-            self.next_seq += 1
-            
-            print(f"[KEY_EXCHANGE] Enviando resposta de troca de chaves")
-            self._send_raw(key_response, addr)
-            
-        except Exception as e:
-            print(f"[KEY_EXCHANGE] Erro durante troca de chaves: {e}")
-            import traceback
-            traceback.print_exc()
+    def get_metrics_collector(self):
+        """Retorna o coletor de métricas para análise posterior"""
+        return self.metrics_collector
 
-    def _handle_key_response(self, packet: TRUPacket):
-        print(f"[KEY_RESPONSE] Recebida resposta de troca de chaves do servidor")
-        
-        try:
-            if len(packet.data) < 10: 
-                print(f"[KEY_RESPONSE] Dados insuficientes")
-                return
-                
-            server_public = struct.unpack('!Q', packet.data[:8])[0]
-            
-            iv_length = struct.unpack('!H', packet.data[8:10])[0]
-            
-            if len(packet.data) >= 10 + iv_length:
-                self.iv = packet.data[10:10+iv_length]
-            else:
-                print(f"[KEY_RESPONSE] IV incompleto ou ausente")
-                return
-            
-            if not all([self.dh_private_key, self.dh_prime, self.dh_generator]):
-                print(f"[KEY_RESPONSE] Parâmetros DH não inicializados")
-                return
-                
-            shared_secret = self.crypto.compute_dh_shared(server_public, self.dh_private_key, self.dh_prime)
-            
-            encryption_key, salt = self.crypto.derive_key(shared_secret)
-            self.encryption_key = encryption_key
-            self.encryption_enabled = True
-            
-            print(f"[KEY_RESPONSE] Chave derivada com sucesso (tamanho: {len(encryption_key)} bytes)")
-            print(f"[KEY_RESPONSE] IV recebido: {self.iv.hex()[:16]}...")
-            
-            if self.crypto.test_encryption(encryption_key):
-                print(f"[KEY_RESPONSE] Criptografia testada com sucesso!")
-                self.key_exchange_event.set()
-            else:
-                print(f"[KEY_RESPONSE] Teste de criptografia falhou")
-                
-        except Exception as e:
-            print(f"[KEY_RESPONSE] Erro ao processar resposta: {e}")
-            import traceback
-            traceback.print_exc()
+    def set_experiment_name(self, name: str):
+        """Define o nome do experimento para identificação nas métricas"""
+        self.experiment_name = name
+        self.metrics_collector.experiment_name = name
+
+    def save_metrics(self, filename: str = None):
+        """Salva as métricas coletadas em arquivo"""
+        if filename is None:
+            filename = f"{self.experiment_name}_metrics.json"
+        return self.metrics_collector.save_to_file(filename)

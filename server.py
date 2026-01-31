@@ -65,13 +65,17 @@ def main():
                    help='Intervalo em segundos para monitoramento de RTT. Default: 5.0')
     p.add_argument('--output', default='received.bin', metavar='ARQUIVO',
                    help='Arquivo de saída para os dados recebidos. Default: received.bin')
+    p.add_argument('--no-congestion', action='store_true',
+               help='Desativar controle de congestionamento')
     args = p.parse_args()
 
     set_global_loss_probability(args.loss)
     loss_p = args.loss
     total_segments = args.packets
 
-    conn = TRUProtocol(host=args.host, port=args.port, is_server=True, loss_callback=loss_filter)
+    conn = TRUProtocol(host=args.host, port=args.port, is_server=True, 
+                   loss_callback=loss_filter,
+                   enable_congestion_control=not args.no_congestion)
 
     conn.receive_stats = {
         'received': 0,
